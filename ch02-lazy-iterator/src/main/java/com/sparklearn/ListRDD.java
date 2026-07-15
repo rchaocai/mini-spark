@@ -7,7 +7,7 @@ import java.util.function.Supplier;
 /**
  * 基于 {@link List} 的 RDD 实现。
  *
- * <p>构造时不复制列表，也不提前遍历；只有调用 {@link #compute()} 时才创建迭代器。
+ * <p>构造时不复制列表，也不提前遍历；这里只保存生成迭代器的方法。
  *
  * @param <T> 元素类型
  */
@@ -17,10 +17,11 @@ public class ListRDD<T> extends RDD<T> {
 
     /**
      * @param data 原始数据列表。ListRDD <strong>不复制</strong>这份数据，
-     *             只记住「怎么访问」——也就是通过 {@code data.iterator()}。
+     *             只把 {@code data.iterator()} 包装成一个可延后执行的方法。
      */
     public ListRDD(List<T> data) {
-        // 不写 new ArrayList<>(data)：这里只保存获取迭代器的方法。
+        // 对 List 来说，compute() 里直接 return data.iterator() 也可以。
+        // 这里使用 Supplier，是为了把“生成 Iterator 的方法”保存成统一形状。
         this.supplier = () -> data.iterator();
     }
 
@@ -29,6 +30,7 @@ public class ListRDD<T> extends RDD<T> {
      */
     @Override
     public Iterator<T> compute() {
+        // 到这里才真正创建 Iterator；每次调用都会创建一个新的。
         return supplier.get();
     }
 }

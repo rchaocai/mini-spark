@@ -3,7 +3,7 @@ title: "第 2 章 · 数据流与延迟迭代"
 weight: 2
 date: 2026-07-15
 tags: ["RDD", "Iterator", "惰性求值", "ListRDD"]
-summary: '造出Spark的第一个抽象——RDD：它不复制整份数据，也不预先物化结果，只记录"怎么访问"。从Iterator、Supplier到ListRDD，用三个零件拼出RDD最核心的那根骨架。'
+summary: '造出Spark的第一个抽象——RDD：它不复制整份数据，也不预先物化结果，只记录"怎么访问"。从Iterator、Supplier到RDD、ListRDD，一步步拼出RDD最核心的骨架。'
 ---
 
 # 第 2 章 · 数据流与延迟迭代
@@ -133,35 +133,112 @@ Deferred 已构造，但计算还没发生。
 
 构造 `Deferred` 时什么都没发生，第一次 `get()` 才触发计算；第二次 `get()` 只打印"已缓存"，没有重新执行那段 `Supplier`。**延迟**这个词，现在你亲眼看见了。
 
-不过 Spark 的 RDD 比 `Deferred` 走得更远：RDD 压根不缓存计算结果，每次调用都要重新算。这件事我们留到第 8 章容错的时候再深聊，眼下你只要先感受"构造一个东西 ≠ 马上执行"就够了。
+不过 Spark 的 RDD 比 `Deferred` 走得更远：这里的 `Deferred` 会缓存第一次计算结果，而本章的 RDD 骨架不会缓存数据；每次需要数据时，它都会重新生成一个迭代器。眼下你只要先感受"构造一个东西 ≠ 马上执行"就够了。
 
-## 2.3 ListRDD：不复制数据，只存"怎么访问"
+## 2.3 RDD 的雏形：一个最小约定
 
-有了 `Supplier` 和 `Iterator` 这两块积木，就可以搭出本章的主角了——`ListRDD`（对应代码 [`ListRDD.java`](https://github.com/rchaocai/mini-spark/tree/main/ch02-lazy-iterator/src/main/java/com/sparklearn/ListRDD.java)）。
+有了 `Iterator` 和 `Supplier`，我们已经有了两块积木：
 
-它的设计简单到让你失望：**`ListRDD` 不复制数据，也不预先计算结果；它只保存一个 `Supplier<Iterator<T>>`**。
+- `Iterator`：真正读数据时用的那扇门。
+- `Supplier`：把"怎么开门"这件事先存起来，等需要时再执行。
 
-构造函数拿到一个 `List`，但它立刻把"怎么拿到这个 `List` 的迭代器"这件事包装成一个 `Supplier` 存下来——绝不复制一份新列表，也绝不提前遍历。注意，这个 `Supplier` 闭包仍然引用着传入的 `List`；数据还在原地，`ListRDD` 保存的是访问入口。
+现在，我们给"数据的代表"定一个最小约定。
 
-这里先提前露出一个很小的抽象类：`RDD<T>` 只规定一件事——任何 RDD 都要能通过 `compute()` 返回一个 `Iterator<T>`。所以 `ListRDD extends RDD<T>` 的意思就是：`ListRDD` 是一种 RDD，它知道怎么从一个 `List` 里拿到迭代器。
+先不要把 RDD 想得很复杂。现在它只回答一个问题：
+
+> 如果有人要读数据，你能不能给他一个 `Iterator`？
+
+这个问题，在代码里就叫 `compute()`（对应代码 [`RDD.java`](https://github.com/rchaocai/mini-spark/tree/main/ch02-lazy-iterator/src/main/java/com/sparklearn/RDD.java)）：
+
+```java
+public abstract class RDD<T> {
+    public abstract Iterator<T> compute();
+}
+```
+
+就这么简单。`RDD<T>` 暂时只是一个约定：**任何 RDD，都必须能在需要数据时返回一个 `Iterator<T>`。**
+
+这个定义看起来近乎"什么都没有"，但它正好抓住了本章要的那根骨架：RDD 先不急着保存一整份数据，也不急着算出结果；它先保存一张"怎么访问数据"的配方。
+
+至于分区、依赖、缓存、优先位置……这些都先不碰。现在我们只让 RDD 学会一件事：需要数据时，交出一扇能往前读的门。
+
+## 2.4 ListRDD：不复制数据，只存"怎么访问"
+
+有了 `RDD` 这个最小约定，就可以搭出第一个具体实现了——`ListRDD`（对应代码 [`ListRDD.java`](https://github.com/rchaocai/mini-spark/tree/main/ch02-lazy-iterator/src/main/java/com/sparklearn/ListRDD.java)）。
+
+从这里开始的示例可以直接运行 [`Main.java`](https://github.com/rchaocai/mini-spark/tree/main/ch02-lazy-iterator/src/main/java/com/sparklearn/Main.java)。它会依次演示 `Deferred`、`ListRDD` 和 `compute()`。
+
+看到这里，你可能会问：`List` 本来就有 `data.iterator()`，为什么还要绕一层 `Supplier`？
+
+这个问题问得对。如果只看 `ListRDD`，下面这种写法也能工作：
+
+```java
+private final List<T> data;
+
+public Iterator<T> compute() {
+    return data.iterator();
+}
+```
+
+而且要注意：这段代码每次调用 `compute()`，也会创建一个新的 `Iterator`。所以关键区别不是"直接 `data.iterator()` 不行"。
+
+关键区别在于：`Supplier` 把"怎么创建 Iterator"这件事抽象成一个字段。
+
+也就是说，`ListRDD` 保存的不是某个固定写死的读取动作，而是一个更一般的东西：
+
+```java
+Supplier<Iterator<T>>
+```
+
+它表达的是一句话：
+
+> 等 `compute()` 被调用时，你能不能给我一个新的 `Iterator`？
+
+今天这个 `Supplier` 是：
+
+```java
+() -> data.iterator()
+```
+
+以后它也可以是：
+
+```java
+() -> Files.lines(path).iterator()
+```
+
+或者：
+
+```java
+() -> readFromPartition(partitionId)
+```
+
+所以，在本章这个最小例子里，直接保存 `List<T> data` 并在 `compute()` 中 `return data.iterator()` 完全可以，而且更容易理解。我们使用 `Supplier`，不是因为 `List` 做不到，而是为了提前采用一个更通用的形状：RDD 保存的是**生成数据流的方法**，不一定保存某个具体容器。
+
+再换个角度看：`ListRDD` 不保存一个已经创建好的 `Iterator`，而是保存一个**创建 Iterator 的方法**。原因很简单：`Iterator` 是一次性的，走到末尾就没了；但"创建 Iterator 的方法"可以反复调用。每次调用 `compute()`，都能重新打开一扇从头开始的门。
+
+所以 `ListRDD extends RDD<T>` 的意思很朴素：`ListRDD` 遵守 RDD 的约定，它能在 `compute()` 被调用时给出一个 `Iterator<T>`。
+
+构造函数拿到一个 `List`，但它不会把这个 `List` 复制一份，也不会提前遍历。它只是把"以后怎么创建迭代器"保存下来。注意，这个 `Supplier` 闭包仍然引用着传入的 `List`；数据还在原地，`ListRDD` 保存的是访问入口：
 
 ```java
 public class ListRDD<T> extends RDD<T> {
     private final Supplier<Iterator<T>> supplier;
 
     public ListRDD(List<T> data) {
-        // 关键：不是 new ArrayList<>(data)，而是用 Supplier 包裹 iterator()
+        // 这里没有读取 data。
+        // 这里只是记住：以后需要数据时，调用 data.iterator()。
         this.supplier = () -> data.iterator();
     }
 
     @Override
     public Iterator<T> compute() {
+        // 到这里才真正创建 Iterator。
         return supplier.get();
     }
 }
 ```
 
-看到关键的那一行了吗？`() -> data.iterator()`——不是 `new ArrayList<>(data)`。没有复制，没有拷贝，只有一行"到时候再拿"的承诺。
+看到关键的那一行了吗？`() -> data.iterator()`——不是 `data.iterator()` 本身，更不是 `new ArrayList<>(data)`。它保存的是"到时候怎么拿"，不是现在就拿。
 
 然后，等到你真的需要数据的时候：
 
@@ -192,11 +269,11 @@ it1 == it2 ? false  ← false，说明每次都是新的！
  hello spark hello world spark is fun
 ```
 
-同一个 `ListRDD` 可以反复消费，每次都是独立的。这为后面第 8 章的容错重算埋下伏笔：只要底层数据或依赖链还在，框架就可以重新调用 `compute()` 生成迭代器，而不会因为上一个迭代器"已经走到末尾"就无法再算。当然这是后话。
+同一个 `ListRDD` 可以反复消费，每次都是独立的。这里先记住一个很小但很关键的事实：**RDD 本身不是那个已经走到末尾的迭代器；RDD 是能重新生成迭代器的对象。**
 
-### 不复制数据，真的有用吗？
+### 回到第 1 章：为什么不能复制一整份数据？
 
-你可能会问：不复制数据，只存一个 `Supplier`——这到底有什么好处？
+到这里，`Supplier` 的作用已经清楚了：它让 `ListRDD` 保存"以后怎么生成 Iterator"。现在再回到第 1 章的问题：数据一旦变大，为什么我们这么在意"不要复制一整份数据"？
 
 先看反面。如果把数据复制一份存进去——
 
@@ -205,42 +282,23 @@ it1 == it2 ? false  ← false，说明每次都是新的！
 this.data = new ArrayList<>(list);  // 把原始数据全拷了一份
 ```
 
-记不记得第 1 章的 50GB 日志场景。如果每次构造一个"数据的代表"都要**复制一整份数据**，你的内存瞬间就炸了，连分块都来不及。
+记不记得第 1 章的 50GB 日志场景。朴素 WordCount 的第一堵墙，就是数据太大，单机内存装不下。现在如果每构造一个"数据的代表"，又把底层数据完整复制一遍，那就等于在原来的问题上再加一份内存压力。`ListRDD` 的做法是：数据还在原地，RDD 只保存访问路径。
 
-`ListRDD` 的做法是：**不复制底层数据，也不提前算结果，只存"怎么访问"。** 就像你不会把图书馆所有的书都复印一份带回家——你只记下"哪个书架、第几本"，要找的时候再去翻。
-
-到了这一步，我们触及了 RDD 的一个核心属性，它反直觉但极其重要：**RDD 不必总是"物化"——它只要知道怎么从原始数据里读出来，就够了。** 我们这个只存访问方式、不预先物化结果的 `ListRDD`，正是这个性质的化身。它描述的是"怎么算"，而不是"算完的结果"。
-
-## 2.4 RDD 的雏形：一个轻量抽象
-
-有了 `ListRDD` 这个具体实现，我们可以往上提一层，给所有"数据的代表"找一个共同的名字——就叫它 RDD（对应代码 [`RDD.java`](https://github.com/rchaocai/mini-spark/tree/main/ch02-lazy-iterator/src/main/java/com/sparklearn/RDD.java)）：
-
-```java
-public abstract class RDD<T> {
-    public abstract Iterator<T> compute();
-}
-```
-
-就这么简单。任何 RDD，只要你能回答"怎么算出你的数据"——也就是实现 `compute()`——那你就是一个合格的 RDD。
-
-现在这个定义看起来近乎"什么都没有"，但先别急着给它填空。本章的任务只是让你认识 RDD 最基本的那根骨架：**RDD 是数据的代表，但它不急着物化数据——它先记录"怎么访问"。**
-
-至于分区（`splits`）、依赖（`dependencies`）、缓存、优先位置……后面的章节会一步一步加上去。一章只加一个新概念——这是我们说好的。
+这就是本章要建立的直觉：**RDD 不必总是"物化"成一份已经算好的数据。它可以先保存访问路径，等真正需要时再生成数据流。** 我们这个 `ListRDD` 只是最小例子，但它已经把方向摆出来了：RDD 描述的是"怎么算、怎么读"，而不是"算完后存在这里的一整份结果"。
 
 ## 2.5 本章小结
 
 回顾一下，这一章我们只做了一件事：**把"数据的代表"造出来。**
 
-具体的零件有三个：
+具体的零件有四个：
 
 1. **`Iterator`** —— 一道访问的门，不是一间储存数据的房。
 2. **`Supplier` / `Deferred`** —— 把"待执行的计算"包装成对象，让你直观感受什么是"延迟"。
-3. **`ListRDD`** —— 持有 `Supplier<Iterator<T>>`，不复制数据、不预先物化结果，只保存访问方式。这是全书第一个具体的 RDD。
+3. **`RDD`** —— 一个最小约定：需要数据时，必须能通过 `compute()` 返回一个 `Iterator`。
+4. **`ListRDD`** —— 第一个遵守这个约定的实现：不复制数据、不预先物化结果，只保存访问方式。
 
-这三个零件拼在一起，回答了第 1 章结尾留下的那个问题——怎么把数据变成代码里能拿来算的东西？答案是 RDD。它不是把数据复制进自己身体里，而是保存一张"怎么算、怎么访问"的配方。
+这四个零件拼在一起，回答了第 1 章结尾留下的那个问题——怎么把数据变成代码里能拿来算的东西？答案是 RDD。它不是把数据复制进自己身体里，而是保存一张"怎么算、怎么访问"的配方。
 
 下一章，我们要在这张配方上加一个关键能力：**变换**。给 RDD 套一层 `map`，它能返回一个新的 RDD——而新 RDD 的 `compute()` 里，又嵌套着老 RDD 的迭代器。等你消费最外层数据的时候，数据会像流水线一样一层层流过来。
-
-那将是第一个"顿悟时刻"。
 
 别急，我们一步一步来。
