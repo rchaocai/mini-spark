@@ -5,16 +5,10 @@ import java.util.Iterator;
 import java.util.List;
 
 /**
- * 第 2 章 · 数据流与延迟迭代 —— 演示入口。
+ * 数据流与延迟迭代的演示入口。
  *
- * <p>本章三个核心验证点：
- * <ol>
- *   <li>ListRDD <strong>不持有数据副本</strong>——构造时不复制，只存「访问方式」</li>
- *   <li>惰性——构造 RDD 时什么也不发生，消费迭代器时才真正读数据</li>
- *   <li>可重复消费——每次 {@code compute()} 返回全新的迭代器</li>
- * </ol>
- *
- * <p>详见 docs/specs/ch02-lazy-iterator.md 与 book/ch02-lazy-iterator.md。
+ * <p>运行后可以看到：延迟计算何时触发、ListRDD 构造时不会遍历数据、
+ * 以及每次 {@code compute()} 都会返回新的迭代器。
  */
 public final class Main {
 
@@ -22,7 +16,7 @@ public final class Main {
     }
 
     public static void main(String[] args) {
-        // ========== 垫脚石：Deferred —— 「一段还没执行的计算」==========
+        // ========== Deferred：一段还没执行的计算 ==========
         System.out.println("=== 1. Deferred：感受「延迟」===");
         System.out.println("构造 Deferred...");
         Deferred<String> lazy = new Deferred<>(() -> {
@@ -33,20 +27,20 @@ public final class Main {
         System.out.println("Deferred 已构造，但计算还没发生。");
         System.out.println("第一次 get(): " + lazy.get());
         System.out.println("第二次 get(): " + lazy.get());
-        System.out.println("看到了吗——第二次 get() 不重新算，直接返回缓存值。\n");
+        System.out.println();
 
-        // ========== ListRDD：持有「访问方式」，不持有数据 ==========
-        System.out.println("=== 2. ListRDD：不存数据副本 ===");
+        // ========== ListRDD：持有「访问方式」，不复制数据 ==========
+        System.out.println("=== 2. ListRDD：不复制数据副本 ===");
         List<String> words = Arrays.asList("hello", "spark", "hello", "world", "spark", "is", "fun");
 
         // 构造 ListRDD —— 注意：这里不复制 words，也不触发任何遍历
         System.out.println("构造 ListRDD（不复制数据）...");
         ListRDD<String> rdd = new ListRDD<>(words);
 
-        // 验证 1：不持有副本 —— 修改原始 list，通过 RDD 再读会看到修改吗？
+        // 验证 1：不复制副本 —— 修改原始 list，通过 RDD 再读会看到修改吗？
         // 注意：ListRDD 持有的是 Supplier(() -> words.iterator())，
         // 所以如果原始 list 被修改了，RDD 再次消费会看到修改。
-        // 这不是 bug——它正是「不持有副本」的证明。
+        // 这不是 bug——它正是「不复制副本」的证明。
         System.out.println("原始数据: " + words);
 
         System.out.println("\n=== 3. 每次 compute() 返回全新迭代器 ===");

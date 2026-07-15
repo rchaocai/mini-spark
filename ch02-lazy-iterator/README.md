@@ -2,7 +2,18 @@
 
 本章是逐章递进的 **mini-Spark 快照**模块，可独立编译运行。
 
-- 规格契约：[`docs/specs/ch02-lazy-iterator.md`](../docs/specs/ch02-lazy-iterator.md)
-- 书稿正文：[`book/ch02-lazy-iterator.md`](../book/ch02-lazy-iterator.md)
+## 运行
 
-> 当前为占位骨架。本章真正实现随书稿推进补全——具体要写哪些类、哪些方法，见 spec 的「代码产出」与「关键设计决策」两节。
+在仓库根目录执行：
+
+```bash
+mvn -q -f ch02-lazy-iterator/pom.xml package
+java -Dfile.encoding=UTF-8 -cp ch02-lazy-iterator/target/classes com.sparklearn.IteratorExamples
+java -Dfile.encoding=UTF-8 -cp ch02-lazy-iterator/target/classes com.sparklearn.Main
+```
+
+## 对应正文
+
+- `IteratorExamples.java`：对应正文 2.1 节的 `ArrayList`、`Iterator`、无限数字流示例。
+- `Deferred.java` 与 `Main.java`：对应正文 2.2 节的延迟计算示例。
+- `RDD.java`、`ListRDD.java` 与 `Main.java`：对应正文 2.3、2.4 节的 RDD 骨架和 `compute()` 示例。
