@@ -1,0 +1,23 @@
+baseURL = 'https://rchaocai.github.io/mini-spark/'
+locale = 'zh-cn'
+title = '手写 mini-spark'
+theme = 'hugo-book'
+
+[params]
+  BookSection = 'docs'
+  BookTheme = 'dark'
+  BookSearch = true
+  BookToC = true
+  BookComments = false
+  BookLogo = ''
+
+[markup]
+  [markup.goldmark]
+    [markup.goldmark.renderer]
+      unsafe = true
+  [markup.highlight]
+    style = 'monokai'
+    lineNos = false
+
+[taxonomies]
+  tag = 'tags'

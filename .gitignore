@@ -1,0 +1,19 @@
+# Hugo
+/public/
+/resources/_gen/
+.hugo_build.lock
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Maven
+**/target/
+
+# Local docs (not for publishing)
+PUBLISH.md

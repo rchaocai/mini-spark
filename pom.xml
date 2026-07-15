@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.sparklearn</groupId>
+  <artifactId>spark-java-book</artifactId>
+  <version>0.1-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <name>手写 mini-Spark（写给 Java 初学者的大数据内功）</name>
+  <description>
+    逐章递进、用 Java 17 手写 mini-Spark 的教学工程。
+    每章一个独立 Maven 模块（快照），配合 docs/specs 规格与 book 书稿。
+  </description>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- 用 JDK 17：records ≈ Scala case class，sealed ≈ Scala sealed trait，贴近参考工程写法 -->
+    <maven.compiler.release>17</maven.compiler.release>
+  </properties>
+
+  <modules>
+    <module>ch01-wordcount</module>
+    <module>ch02-lazy-iterator</module>
+    <module>ch03-mappartitions-pipeline</module>
+    <module>ch04-dependencies</module>
+    <module>ch05-multithread-task</module>
+    <module>ch06-shuffle</module>
+    <module>ch07-stage-dag</module>
+    <module>ch08-fault-tolerance</module>
+    <module>ch09-network-rpc</module>
+    <module>ch10-cache-checkpoint</module>
+    <module>ch11-real-spark</module>
+    <module>ch12-dataframe-future</module>
+  </modules>
+</project>
