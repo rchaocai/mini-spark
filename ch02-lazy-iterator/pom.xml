@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.sparklearn</groupId>
+    <artifactId>spark-java-book</artifactId>
+    <version>0.1-SNAPSHOT</version>
+  </parent>
+  <artifactId>ch02-lazy-iterator</artifactId>
+  <name>第 2 章 · 数据流与延迟迭代</name>
+  <description>《手写 mini-Spark》第 2 章代码快照：数据流与延迟迭代。</description>
+</project>
