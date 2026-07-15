@@ -17,7 +17,8 @@ theme = 'hugo-book'
       unsafe = true
   [markup.highlight]
     style = 'monokai'
-    lineNos = false
+    lineNos = true
+    lineNumbersInTable = true
 
 [taxonomies]
   tag = 'tags'
