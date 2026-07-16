@@ -38,6 +38,7 @@ public final class Main {
                 4);
 
         System.out.println("串行 collect(): " + rdd.collect());
+        System.out.println();
         try (TaskScheduler scheduler = new TaskScheduler(4, true)) {
             System.out.println("并行 collect(): " + scheduler.collect(rdd));
         }

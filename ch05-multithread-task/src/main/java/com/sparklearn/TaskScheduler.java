@@ -15,7 +15,7 @@ import java.util.function.BinaryOperator;
  * 单机多线程版 TaskScheduler。
  *
  * <p>每个分区创建一个 Task，提交到固定大小的线程池；Task 返回自己的结果，
- * 调度器在主线程中统一合并。
+ * 调用 action 的线程统一合并。
  */
 public final class TaskScheduler implements AutoCloseable {
 
@@ -53,7 +53,7 @@ public final class TaskScheduler implements AutoCloseable {
     }
 
     /**
-     * 并行 count：每个分区独立计数，最后在主线程累加。
+     * 并行 count：每个分区独立计数，最后由调用 action 的线程累加。
      */
     public <T> long count(RDD<T> rdd) {
         Objects.requireNonNull(rdd, "rdd");
