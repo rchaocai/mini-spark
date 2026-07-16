@@ -49,6 +49,32 @@ public record Partition(int index) implements Serializable {
 
 完整实现见 [`Partition.java`](https://github.com/rchaocai/mini-spark/tree/main/ch04-dependencies/src/main/java/com/sparklearn/Partition.java)。
 
+> [!INFO]
+> **`record` 是什么？**
+>
+> `record` 是 Java 16 正式引入的语法，适合编写“只负责保存几个值”的类。下面这一行：
+>
+> ```java
+> public record Partition(int index) {
+> }
+> ```
+>
+> 等于告诉编译器：`Partition` 有一个不可修改的 `index` 字段，请自动生成构造方法、取值方法、`equals()`、`hashCode()` 和 `toString()`。
+>
+> 因此，我们可以创建一个分区编号：
+>
+> ```java
+> Partition partition = new Partition(0);
+> ```
+>
+> 再用 `index()` 取出它，而不是调用常见的 `getIndex()`：
+>
+> ```java
+> int index = partition.index();
+> ```
+>
+> `record` 是帮我们省掉了一批重复代码，`Partition` 目前只需要保存一个编号，用 `record` 正合适。
+
 这里要把前面的直觉和本章的代码表示区分开。直觉里的“分区”是一块被切出来的数据；到了代码里，`Partition` 先只表示这块数据的身份，也就是“第几块”。真正的数据在哪里、怎么读，以后会挂到 RDD 和调度层上。
 
 所以，`Partition` 只是一个带编号的值。它不保存数据，也不负责计算，只告诉外界：
@@ -101,7 +127,18 @@ public sealed interface Dependency<T> permits NarrowDependency, ShuffleDependenc
 
 完整实现见 [`Dependency.java`](https://github.com/rchaocai/mini-spark/tree/main/ch04-dependencies/src/main/java/com/sparklearn/Dependency.java)。
 
-如果你还没用过 `sealed`，先不用被这个语法绊住。它的意思只是：`Dependency` 只允许下面列出的几种子类型。把它暂时看成普通 `interface`，也不影响理解本章主线。
+> [!INFO]
+> **`sealed interface` 是什么？**
+>
+> `sealed` 是 Java 17 正式引入的语法，用来限制一个接口或类“只能被谁继承/实现”。下面这一行：
+>
+> ```java
+> public sealed interface Dependency<T> permits NarrowDependency, ShuffleDependency
+> ```
+>
+> 意思是：`Dependency` 只能由 `NarrowDependency` 和 `ShuffleDependency` 这两类来实现，不能随便再冒出第三类依赖。
+>
+> 如果你还没用过 `sealed`，先不用被这个语法绊住。把它暂时看成普通 `interface`，也不影响理解本章主线；它只是把“依赖只有窄依赖和 shuffle 依赖两大类”这件事写得更明确。
 
 这里有两个重点。
 
