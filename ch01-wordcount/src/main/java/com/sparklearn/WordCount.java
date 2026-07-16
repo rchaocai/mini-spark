@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 第 1 章 · 从 WordCount 到 50GB 日志 —— 朴素单机版 WordCount。
+ * 第 1 章 · 从 WordCount 开始 —— 朴素单机版 WordCount。
  *
  * <p>用最朴素的 Java，在单机内存里统计词频。它是一个基准：当数据量涨到
  * 50GB 时，这段代码会撞上两个瓶颈——内存装不下、单核算得慢——而这正是

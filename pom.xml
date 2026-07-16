@@ -25,5 +25,6 @@
     <module>ch01-wordcount</module>
     <module>ch02-lazy-iterator</module>
     <module>ch03-mappartitions-pipeline</module>
+    <module>ch04-dependencies</module>
   </modules>
 </project>

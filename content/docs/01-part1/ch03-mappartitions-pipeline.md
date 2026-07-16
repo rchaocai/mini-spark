@@ -1,12 +1,12 @@
 ---
-title: "第 3 章 · MapPartitionsRDD 与惰性流水线"
+title: "第 3 章 · RDD 的惰性流水线"
 weight: 3
 date: 2026-07-16
 tags: ["RDD", "MapPartitionsRDD", "Iterator", "惰性求值", "流水线"]
 summary: "给 RDD 加上 map、filter 和 flatMap：每个算子只包装父迭代器，collect 才从最外层开始拉取数据。通过多层 map 的打印顺序，看清惰性流水线如何自然形成。"
 ---
 
-# 第 3 章 · MapPartitionsRDD 与惰性流水线
+# 第 3 章 · RDD 的惰性流水线
 
 > 💻 本章完整代码：[GitHub 查看](https://github.com/rchaocai/mini-spark/tree/main/ch03-mappartitions-pipeline)
 >

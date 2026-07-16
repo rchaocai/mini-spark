@@ -1,4 +1,4 @@
-# 第 3 章 · MapPartitionsRDD 与惰性流水线
+# 第 3 章 · RDD 的惰性流水线
 
 本章是逐章递进的 **mini-Spark 快照**模块，可独立编译运行。
 

@@ -8,9 +8,9 @@
     <artifactId>spark-java-book</artifactId>
     <version>0.1-SNAPSHOT</version>
   </parent>
-  <artifactId>ch03-mappartitions-pipeline</artifactId>
-  <name>第 3 章 · RDD 的惰性流水线</name>
-  <description>《手写 mini-Spark》第 3 章代码快照：RDD 的惰性流水线。</description>
+  <artifactId>ch04-dependencies</artifactId>
+  <name>第 4 章 · 血缘与依赖</name>
+  <description>《手写 mini-Spark》第 4 章代码快照：血缘与依赖。</description>
 
   <dependencies>
     <dependency>

@@ -9,6 +9,6 @@
     <version>0.1-SNAPSHOT</version>
   </parent>
   <artifactId>ch01-wordcount</artifactId>
-  <name>第 1 章 · 从 WordCount 到 100TB 挑战</name>
-  <description>《手写 mini-Spark》第 1 章代码快照：从 WordCount 到 100TB 挑战。</description>
+  <name>第 1 章 · 从 WordCount 开始</name>
+  <description>《手写 mini-Spark》第 1 章代码快照：从 WordCount 开始。</description>
 </project>

@@ -19,10 +19,10 @@ bookToc: false
 
 | 章 | 标题 |
 |---|------|
-| 1 | 从 WordCount 到 50GB 日志 |
+| 1 | 从 WordCount 开始 |
 | 2 | 数据流与延迟迭代 |
-| 3 | MapPartitionsRDD 与惰性流水线 |
-| 4 | 血缘与窄依赖 |
+| 3 | RDD 的惰性流水线 |
+| 4 | 血缘与依赖 |
 
 ### 第二部分 · Shuffle 与调度
 

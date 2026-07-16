@@ -1,12 +1,12 @@
 ---
-title: "第 1 章 · 从 WordCount 到 50GB 日志"
+title: "第 1 章 · 从 WordCount 开始"
 weight: 1
 date: 2026-07-15
 tags: ["WordCount", "分区", "并行"]
 summary: "从一行朴素 WordCount 出发，把数据放大到 50GB，直面单机的「存不下、算得慢」两堵墙，学会分块和让计算并行——这是我们一切设计的出发点。"
 ---
 
-# 第 1 章 · 从 WordCount 到 50GB 日志
+# 第 1 章 · 从 WordCount 开始
 
 > 💻 本章完整代码：[GitHub 查看](https://github.com/rchaocai/mini-spark/tree/main/ch01-wordcount)
 >

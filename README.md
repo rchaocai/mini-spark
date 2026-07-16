@@ -8,9 +8,9 @@
 
 | 章 | 标题 | module |
 |----|------|--------|
-| 1 | 从 WordCount 到 50GB 日志 | `ch01-wordcount` |
+| 1 | 从 WordCount 开始 | `ch01-wordcount` |
 | 2 | 数据流与延迟迭代 | `ch02-lazy-iterator` |
-| 3 | MapPartitionsRDD 与惰性流水线 | `ch03-mappartitions-pipeline` |
+| 3 | RDD 的惰性流水线 | `ch03-mappartitions-pipeline` |
 | 4 | 血缘与窄依赖 | `ch04-dependencies` |
 | 5 | 多线程执行：从分区到 Task | `ch05-multithread-task` |
 | 6 | 亲手写一个 Shuffle | `ch06-shuffle` |
