@@ -24,11 +24,11 @@ bookToc: false
 | 3 | RDD 的惰性流水线 |
 | 4 | 血缘与依赖 |
 
-### 第二部分 · Shuffle 与调度
+### 第二部分 · 调度与 Shuffle
 
 | 章 | 标题 |
 |---|------|
-| 5 | 多线程执行：从分区到 Task |
+| 5 | 从分区到 Task |
 | 6 | 亲手写一个 Shuffle |
 | 7 | 划分 Stage 与 DAG |
 | 8 | 容错：FaultyIterator 与重算 |

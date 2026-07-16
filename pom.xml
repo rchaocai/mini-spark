@@ -26,5 +26,6 @@
     <module>ch02-lazy-iterator</module>
     <module>ch03-mappartitions-pipeline</module>
     <module>ch04-dependencies</module>
+    <module>ch05-multithread-task</module>
   </modules>
 </project>

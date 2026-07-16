@@ -11,8 +11,8 @@
 | 1 | 从 WordCount 开始 | `ch01-wordcount` |
 | 2 | 数据流与延迟迭代 | `ch02-lazy-iterator` |
 | 3 | RDD 的惰性流水线 | `ch03-mappartitions-pipeline` |
-| 4 | 血缘与窄依赖 | `ch04-dependencies` |
-| 5 | 多线程执行：从分区到 Task | `ch05-multithread-task` |
+| 4 | 血缘与依赖 | `ch04-dependencies` |
+| 5 | 从分区到 Task | `ch05-multithread-task` |
 | 6 | 亲手写一个 Shuffle | `ch06-shuffle` |
 | 7 | 划分 Stage 与 DAG | `ch07-stage-dag` |
 | 8 | 容错：FaultyIterator 与重算 | `ch08-fault-tolerance` |
@@ -38,7 +38,7 @@ mvn -q -pl ch01-wordcount exec:java -Dexec.mainClass=com.sparklearn.WordCount   
 书稿分为三个部分，建议按顺序阅读：
 
 - **第一部分（Ch1-4）**：RDD 核心——分区、惰性迭代器、流水线、血缘
-- **第二部分（Ch5-8）**：Shuffle 与调度——多线程、落盘、DAG、容错
+- **第二部分（Ch5-8）**：调度与 Shuffle——多线程、落盘、DAG、容错
 - **第三部分（Ch9-12）**：云端与未来——网络、缓存、真实 Spark 对照、DataFrame
 
 ## 许可

@@ -1,12 +1,12 @@
 ---
-title: 第二部分 · Shuffle 与调度
+title: 第二部分 · 调度与 Shuffle
 url: /docs/part2/
 weight: 3
 bookCollapseSection: true
 ---
 
-# 第二部分 · Shuffle 与调度
+# 第二部分 · 调度与 Shuffle
 
-从单机到分布式，核心跨越是 **Shuffle 和调度**。这部分先让你亲手把中间结果落盘（Shuffle），再由"必须落盘"反推出 Stage 边界和 DAG，最后用不可变 + 血缘实现廉价容错。
+从单线程走向分布式，先要把分区交给 Task 并行执行；遇到跨分区计算时，再让中间数据通过 Shuffle 重新分布。沿着这条路，我们会继续得到 Stage、DAG 和基于血缘的容错。
 
-这是全书最深的一部分——你将亲手触摸到 Spark 设计中最精妙的那层"为什么"。
+这一部分会把前面搭好的 RDD 从“描述计算”推到“真正调度计算”。
