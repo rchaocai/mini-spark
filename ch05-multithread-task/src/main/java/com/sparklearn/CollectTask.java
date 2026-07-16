@@ -7,23 +7,23 @@ import java.util.Objects;
 import java.util.concurrent.Callable;
 
 /**
- * Task：封装“计算一个 RDD 的一个分区”。
+ * collect 使用的分区任务：计算一个 RDD 分区并返回其中的全部元素。
  *
- * <p>Task 不写共享容器，只把当前分区的结果作为返回值交给调度器。
+ * <p>CollectTask 不写共享容器，只把当前分区的结果作为返回值交给调度器。
  *
  * @param <T> 元素类型
  */
-public final class Task<T> implements Callable<List<T>> {
+public final class CollectTask<T> implements Callable<List<T>> {
 
     private final RDD<T> rdd;
     private final Partition partition;
     private final boolean verbose;
 
-    public Task(RDD<T> rdd, Partition partition) {
+    public CollectTask(RDD<T> rdd, Partition partition) {
         this(rdd, partition, false);
     }
 
-    public Task(RDD<T> rdd, Partition partition, boolean verbose) {
+    public CollectTask(RDD<T> rdd, Partition partition, boolean verbose) {
         this.rdd = Objects.requireNonNull(rdd, "rdd");
         this.partition = Objects.requireNonNull(partition, "partition");
         this.verbose = verbose;

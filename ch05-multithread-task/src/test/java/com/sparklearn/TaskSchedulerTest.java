@@ -1,10 +1,12 @@
 package com.sparklearn;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Set;
@@ -27,13 +29,26 @@ final class TaskSchedulerTest {
 
     @Test
     void parallelCollectKeepsPartitionOrder() {
-        RDD<Integer> rdd = new ListRDD<>(Arrays.asList(1, 2, 3, 4, 5, 6), 3)
-                .map(number -> number * 10)
-                .filter(number -> number > 20);
+        CountDownLatch laterPartitionsFinished = new CountDownLatch(2);
+        List<Integer> computationOrder = Collections.synchronizedList(new ArrayList<>());
+        RDD<Integer> rdd = new ListRDD<>(List.of(1, 2, 3), 3)
+                .map(number -> {
+                    if (number == 1) {
+                        awaitLatch(laterPartitionsFinished, "later partitions did not finish first");
+                    }
+                    computationOrder.add(number);
+                    if (number != 1) {
+                        laterPartitionsFinished.countDown();
+                    }
+                    return number * 10;
+                });
 
         try (TaskScheduler scheduler = new TaskScheduler(3)) {
-            assertEquals(List.of(30, 40, 50, 60), scheduler.collect(rdd));
+            assertEquals(List.of(10, 20, 30), scheduler.collect(rdd));
         }
+        assertEquals(1, computationOrder.get(2));
+        assertNotEquals(1, computationOrder.get(0));
+        assertNotEquals(1, computationOrder.get(1));
     }
 
     @Test
@@ -86,9 +101,13 @@ final class TaskSchedulerTest {
     }
 
     private static void awaitAllPartitions(CountDownLatch allPartitionsStarted) {
+        awaitLatch(allPartitionsStarted, "partitions did not run concurrently");
+    }
+
+    private static void awaitLatch(CountDownLatch latch, String timeoutMessage) {
         try {
-            if (!allPartitionsStarted.await(5, TimeUnit.SECONDS)) {
-                throw new IllegalStateException("partitions did not run concurrently");
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException(timeoutMessage);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

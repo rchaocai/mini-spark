@@ -14,7 +14,7 @@ import java.util.function.BinaryOperator;
 /**
  * 单机多线程版 TaskScheduler。
  *
- * <p>每个分区创建一个 Task，提交到固定大小的线程池；Task 返回自己的结果，
+ * <p>每个分区创建一个独立计算，提交到固定大小的线程池；分区计算返回自己的结果，
  * 调用 action 的线程统一合并。
  */
 public final class TaskScheduler implements AutoCloseable {
@@ -35,14 +35,14 @@ public final class TaskScheduler implements AutoCloseable {
     }
 
     /**
-     * 并行 collect：每个分区一个 Task，最后按分区顺序合并结果。
+     * 并行 collect：每个分区一个 CollectTask，最后按分区顺序合并结果。
      */
     public <T> List<T> collect(RDD<T> rdd) {
         Objects.requireNonNull(rdd, "rdd");
 
         List<Future<List<T>>> futures = new ArrayList<>();
         for (Partition partition : rdd.partitions()) {
-            futures.add(executor.submit(new Task<>(rdd, partition, verbose)));
+            futures.add(executor.submit(new CollectTask<>(rdd, partition, verbose)));
         }
 
         List<T> result = new ArrayList<>();

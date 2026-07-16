@@ -18,7 +18,7 @@ java -Dfile.encoding=UTF-8 \
 ## 对应正文
 
 - `ListRDD.java`：支持把内存 List 均匀切成多个分区。
-- `Task.java`：封装“计算一个 RDD 的一个分区”。
-- `TaskScheduler.java`：用固定线程池并行提交所有分区 Task，并合并结果。
+- `CollectTask.java`：封装 `collect()` 对一个 RDD 分区的计算。
+- `TaskScheduler.java`：用固定线程池并行提交所有分区任务，并合并结果。
 - `RDD.java`：保留串行 `collect`、`count`、`reduce`，用于和并行版对照。
-- `Main.java`：演示多分区、并行 collect/count/reduce，以及 Task 无共享状态。
+- `Main.java`：演示多分区、并行 collect/count/reduce，以及分区任务无共享状态。
