@@ -27,5 +27,6 @@
     <module>ch03-mappartitions-pipeline</module>
     <module>ch04-dependencies</module>
     <module>ch05-multithread-task</module>
+    <module>ch06-shuffle</module>
   </modules>
 </project>
