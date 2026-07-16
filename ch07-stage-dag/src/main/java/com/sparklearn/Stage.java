@@ -20,7 +20,7 @@ public record Stage(
         RDD<?> rdd,
         boolean shuffleMap,
         List<Stage> parents,
-        Optional<ShuffleDependency<?>> shuffleDependency) {
+        Optional<ShuffleDependency<?, ?>> shuffleDependency) {
 
     public Stage {
         parents = List.copyOf(parents);

@@ -65,6 +65,25 @@ public final class TaskScheduler implements AutoCloseable {
     }
 
     /**
+     * 并行运行 ShuffleMapStage：每个 Map 分区写出自己的 shuffle 中间文件。
+     */
+    public <K, V> void runShuffleMapTasks(
+            RDD<KeyValuePair<K, V>> rdd,
+            ShuffleDependency<K, V> dependency) {
+        Objects.requireNonNull(rdd, "rdd");
+        Objects.requireNonNull(dependency, "dependency");
+
+        List<Future<Void>> futures = new ArrayList<>();
+        for (Partition partition : rdd.partitions()) {
+            futures.add(executor.submit(new ShuffleMapTask<>(rdd, partition, dependency)));
+        }
+
+        for (Future<Void> future : futures) {
+            await(future);
+        }
+    }
+
+    /**
      * 并行 count：每个分区独立计数，最后由调用 action 的线程累加。
      */
     public <T> long count(RDD<T> rdd) {

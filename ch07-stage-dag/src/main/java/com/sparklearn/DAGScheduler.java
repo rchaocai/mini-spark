@@ -80,7 +80,7 @@ public final class DAGScheduler {
                 Optional.empty());
     }
 
-    private Stage newShuffleMapStage(ShuffleDependency<?> dependency) {
+    private Stage newShuffleMapStage(ShuffleDependency<?, ?> dependency) {
         List<Stage> parents = getParentStages(dependency.rdd());
         return new Stage(
                 nextStageId.getAndIncrement(),
@@ -106,7 +106,7 @@ public final class DAGScheduler {
         }
 
         for (Dependency<?> dependency : rdd.dependencies()) {
-            if (dependency instanceof ShuffleDependency<?> shuffleDependency) {
+            if (dependency instanceof ShuffleDependency<?, ?> shuffleDependency) {
                 parents.add(newShuffleMapStage(shuffleDependency));
             } else {
                 visit(dependency.rdd(), parents, visited);
@@ -121,12 +121,12 @@ public final class DAGScheduler {
             Function<List<T>, U> partitionFunction,
             Set<Integer> finishedStages) {
         if (stage.shuffleMap()) {
-            submitShuffleMapStage(stage, finishedStages);
+            submitShuffleMapStage(stage, taskScheduler, finishedStages);
             return List.of();
         }
 
         for (Stage parent : stage.parents()) {
-            submitShuffleMapStage(parent, finishedStages);
+            submitShuffleMapStage(parent, taskScheduler, finishedStages);
         }
 
         if (verbose) {
@@ -135,13 +135,16 @@ public final class DAGScheduler {
         return submitMissingTasks(stage, taskScheduler, partitionFunction);
     }
 
-    private void submitShuffleMapStage(Stage stage, Set<Integer> finishedStages) {
+    private void submitShuffleMapStage(
+            Stage stage,
+            TaskScheduler taskScheduler,
+            Set<Integer> finishedStages) {
         if (!finishedStages.add(stage.id())) {
             return;
         }
 
         for (Stage parent : stage.parents()) {
-            submitShuffleMapStage(parent, finishedStages);
+            submitShuffleMapStage(parent, taskScheduler, finishedStages);
         }
         if (!stage.shuffleMap()) {
             throw new IllegalArgumentException("stage must be a ShuffleMapStage");
@@ -150,7 +153,7 @@ public final class DAGScheduler {
         if (verbose) {
             System.out.println("提交 " + stage);
         }
-        submitMissingTasks(stage);
+        submitMissingTasks(stage, taskScheduler);
         if (verbose) {
             System.out.println("  shuffle map 输出已写入磁盘");
         }
@@ -175,13 +178,14 @@ public final class DAGScheduler {
         return result;
     }
 
-    private void submitMissingTasks(Stage stage) {
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private void submitMissingTasks(Stage stage, TaskScheduler taskScheduler) {
         if (!stage.shuffleMap()) {
             throw new IllegalArgumentException("shuffle map stage expected");
         }
-        stage.shuffleDependency()
-                .orElseThrow(() -> new IllegalStateException("missing shuffle dependency"))
-                .materialize();
+        ShuffleDependency dependency = stage.shuffleDependency()
+                .orElseThrow(() -> new IllegalStateException("missing shuffle dependency"));
+        taskScheduler.runShuffleMapTasks((RDD) stage.rdd(), dependency);
     }
 
     private void printStage(Stage stage, int indent) {
