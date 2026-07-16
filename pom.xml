@@ -28,5 +28,6 @@
     <module>ch04-dependencies</module>
     <module>ch05-multithread-task</module>
     <module>ch06-shuffle</module>
+    <module>ch07-stage-dag</module>
   </modules>
 </project>

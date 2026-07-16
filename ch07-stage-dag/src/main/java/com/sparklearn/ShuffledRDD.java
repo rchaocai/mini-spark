@@ -37,6 +37,7 @@ public final class ShuffledRDD<K, V> extends RDD<KeyValuePair<K, V>> {
     private final File shuffleDir;
     private final BinaryOperator<V> reduceFunc;
     private final int numMapPartitions;
+    private final ShuffleDependency<KeyValuePair<K, V>> shuffleDependency;
 
     private volatile boolean mapPhaseDone = false;
 
@@ -56,6 +57,7 @@ public final class ShuffledRDD<K, V> extends RDD<KeyValuePair<K, V>> {
             partitionList.add(new Partition(index));
         }
         this.partitions = List.copyOf(partitionList);
+        this.shuffleDependency = new ShuffleDependency<>(parent, this::ensureMapPhase);
 
         try {
             this.shuffleDir = java.nio.file.Files.createTempDirectory("spark-shuffle-").toFile();
@@ -189,11 +191,11 @@ public final class ShuffledRDD<K, V> extends RDD<KeyValuePair<K, V>> {
 
     @Override
     public List<Dependency<?>> dependencies() {
-        return List.of(new ShuffleDependency<>(parent));
+        return List.of(shuffleDependency);
     }
 
     /**
-     * 返回 shuffle 中间文件的目录，供 demo 和测试查看。
+     * 返回 shuffle 中间文件的目录，供示例程序和测试查看。
      */
     public File shuffleDir() {
         return shuffleDir;

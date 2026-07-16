@@ -56,7 +56,7 @@ java  -> 1
 | `KeyValuePair<K, V>` | 表示 `(key, value)` |
 | `ShuffledRDD<K, V>` | 实现硬编码版 `reduceByKey` |
 
-调用方式也尽量贴近 Spark：在键值对 RDD 上调用 `rdd.reduceByKey(...)`。`TaskScheduler` 仍然照旧：拿到一个 RDD，为它的每个分区提交一个 Task。真正变化的是 `ShuffledRDD.compute(partition)` 内部不再只沿父 RDD 的迭代器往上追，而是先让 Map 端写文件，再让 Reduce 端读文件。
+调用方式也尽量贴近 Spark：先用 `SparkContext` 创建 RDD，在键值对 RDD 上调用 `rdd.reduceByKey(...)`，最后用 `shuffled.collect()` 触发 action。`TaskScheduler` 仍然在底层负责并行执行分区任务，但用户不再手动把 RDD 交给调度器。
 
 ## 6.1 单个分区算不出全局答案
 
@@ -112,13 +112,13 @@ public record KeyValuePair<K, V>(K key, V value) implements Serializable {
 new KeyValuePair<>("hello", 1)
 ```
 
-接着，用第 5 章已有的 `ListRDD` 把这些键值对切成 3 个 Map 分区：
+接着，用 `SparkContext.parallelize(...)` 把这些键值对切成 3 个 Map 分区：
 
 ```java
-ListRDD<KeyValuePair<String, Integer>> rdd = new ListRDD<>(words, 3);
+RDD<KeyValuePair<String, Integer>> rdd = sc.parallelize(words, 3);
 ```
 
-第 6 章没有改 `ListRDD`。它仍然按连续区间切分 List。也就是说，本章的代码确实是在第 5 章基础上增加 Shuffle，而不是换了一套数据源。
+注意变量类型写的是 `RDD`，不是 `ListRDD`。Spark 源码里的 `parallelize` 也是这样：方法返回 `RDD[T]`，内部才创建一个具体的本地集合 RDD。mini 版对应地返回 `RDD<T>`，实际对象仍然是 `ListRDD`，它按连续区间切分 List。也就是说，这里只是增加了 Shuffle 逻辑，不是换了一套数据源。
 
 ## 6.3 Map 端：按 key 哈希写文件
 
@@ -315,17 +315,17 @@ private static void demonstrateShuffle() {
             new KeyValuePair<>("spark", 1),
             new KeyValuePair<>("hello", 1));
 
-    ListRDD<KeyValuePair<String, Integer>> rdd = new ListRDD<>(words, 3);
-    ShuffledRDD<String, Integer> shuffled = rdd.reduceByKey(
-            Integer::sum, 2);
+    try (SparkContext sc = new SparkContext(2, true)) {
+        RDD<KeyValuePair<String, Integer>> rdd = sc.parallelize(words, 3);
+        ShuffledRDD<String, Integer> shuffled = rdd.reduceByKey(
+                Integer::sum, 2);
 
-    try (TaskScheduler scheduler = new TaskScheduler(2, true)) {
-        System.out.println("reduceByKey 结果: " + scheduler.collect(shuffled));
+        System.out.println("reduceByKey 结果: " + shuffled.collect());
     }
 }
 ```
 
-前两步只是准备数据和构造 `ShuffledRDD`。真正触发 Shuffle 的，是最后这一句 `scheduler.collect(shuffled)`。
+前两步只是准备数据和构造 `ShuffledRDD`。真正触发 Shuffle 的，是最后这一句 `shuffled.collect()`。
 
 运行本章 demo：
 
@@ -351,10 +351,10 @@ java -Dfile.encoding=UTF-8 -cp ch06-shuffle/target/classes com.sparklearn.Main
 这句话很重要。`reduceByKey` 仍然是 transformation，不是 action。真正触发计算的是后面的：
 
 ```java
-scheduler.collect(shuffled)
+shuffled.collect()
 ```
 
-`collect` 会为 `ShuffledRDD` 的 2 个 Reduce 分区提交 2 个 Task。第一次进入 `ShuffledRDD.compute()` 时，当前线程会先顺序推动 3 个父分区写出中间文件。随后两个 Reduce 分区任务再读这些文件，合并出最终结果。
+`shuffled.collect()` 会先进入 `SparkContext.runJob(...)`，再由底层 `TaskScheduler` 为 `ShuffledRDD` 的 2 个 Reduce 分区提交 2 个 Task。第一次进入 `ShuffledRDD.compute()` 时，当前线程会先顺序推动 3 个父分区写出中间文件。随后两个 Reduce 分区任务再读这些文件，合并出最终结果。
 
 结果里 key 的顺序不重要。当前实现最后从 `HashMap` 取结果，输出顺序可能和前面列出的期望顺序不同；只要每个 key 的计数对上，就是正确结果。
 
