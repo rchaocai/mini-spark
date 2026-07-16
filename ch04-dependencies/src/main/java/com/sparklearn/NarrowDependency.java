@@ -4,7 +4,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * 窄依赖：子 RDD 的每个分区只依赖父 RDD 的有限几个分区。
+ * 窄依赖：子 RDD 的每个分区只依赖父 RDD 的少数固定分区。
  *
  * @param <T> 父 RDD 的元素类型
  */
