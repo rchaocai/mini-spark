@@ -24,7 +24,7 @@
 ## 构建
 
 ```bash
-mvn -q compile                          # 编译全部 12 章
+mvn -q compile                          # 编译当前已完成章节
 mvn -q -pl ch01-wordcount compile       # 只编译第 1 章
 mvn -q -pl ch01-wordcount exec:java -Dexec.mainClass=com.sparklearn.WordCount   # 跑第 1 章示例
 ```

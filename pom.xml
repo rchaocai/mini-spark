@@ -29,5 +29,6 @@
     <module>ch05-multithread-task</module>
     <module>ch06-shuffle</module>
     <module>ch07-stage-dag</module>
+    <module>ch08-fault-tolerance</module>
   </modules>
 </project>
