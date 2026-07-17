@@ -291,10 +291,51 @@ private void ensureMapPhase() {
 
 ### 再写出 Map 端文件
 
-进入 `runMapPhase()` 后，逻辑分两层：
+进入 `runMapPhase()` 后，先看完整代码：
 
-1. 遍历父 RDD 的每个 Map 分区。
-2. 对每个 Map 分区，准备 N 个桶，N 等于 Reduce 分区数。
+```java
+private void runMapPhase() {
+    for (Partition mapPart : parent.partitions()) {
+        int mapId = mapPart.index();
+
+        List<Map<K, V>> buckets = new ArrayList<>();
+        for (int i = 0; i < numReducePartitions; i++) {
+            buckets.add(new HashMap<>());
+        }
+
+        Iterator<KeyValuePair<K, V>> it = parent.iterator(mapPart);
+        while (it.hasNext()) {
+            KeyValuePair<K, V> kv = it.next();
+            int bucketId = partition(kv.key(), numReducePartitions);
+            buckets.get(bucketId).merge(kv.key(), kv.value(), reduceFunc);
+        }
+
+        for (int reduceId = 0; reduceId < numReducePartitions; reduceId++) {
+            writeMapOutput(mapId, reduceId, buckets.get(reduceId));
+        }
+    }
+}
+```
+
+这段代码分三层。
+
+第一层，遍历父 RDD 的每个 Map 分区：
+
+```java
+for (Partition mapPart : parent.partitions()) {
+    int mapId = mapPart.index();
+    // ...
+}
+```
+
+第二层，对每个 Map 分区准备 N 个桶，N 等于 Reduce 分区数：
+
+```java
+List<Map<K, V>> buckets = new ArrayList<>();
+for (int i = 0; i < numReducePartitions; i++) {
+    buckets.add(new HashMap<>());
+}
+```
 
 每读到一条键值对，就用 key 的哈希值决定它进入哪个桶：
 
@@ -334,6 +375,12 @@ world -> 1
 
 最后，每个桶写成一个文件。文件名同时记录来源和去向：
 
+```java
+for (int reduceId = 0; reduceId < numReducePartitions; reduceId++) {
+    writeMapOutput(mapId, reduceId, buckets.get(reduceId));
+}
+```
+
 ```text
 map_0_reduce_0
 map_0_reduce_1
@@ -345,7 +392,25 @@ map_2_reduce_1
 
 3 个 Map 分区，2 个 Reduce 分区，所以一共 6 个文件。空桶也会写一个表示 `size=0` 的文件。这样 Reduce 端可以清楚地区分“这个桶为空”和“这个文件丢了”。
 
-文件格式不是本章重点。代码里直接用了 Java 自带的 `ObjectOutputStream`，把 key 和 value 按对象写进去。因为用了对象序列化，本章示例默认 key 和 value 都能被序列化；`String` 和 `Integer` 没问题，如果换成自定义对象，就要自己实现可序列化。现在先关心 Shuffle 的物理过程：谁写、写到哪、谁再读。
+文件格式不是本章重点。代码里直接用了 Java 自带的 `ObjectOutputStream`：
+
+```java
+private void writeMapOutput(int mapId, int reduceId, Map<K, V> data) {
+    File file = mapOutputFile(mapId, reduceId);
+    try (ObjectOutputStream out = new ObjectOutputStream(
+            new BufferedOutputStream(new FileOutputStream(file)))) {
+        out.writeInt(data.size());
+        for (var entry : data.entrySet()) {
+            out.writeObject(entry.getKey());
+            out.writeObject(entry.getValue());
+        }
+    } catch (IOException e) {
+        throw new UncheckedIOException("写入 shuffle 文件失败: " + file, e);
+    }
+}
+```
+
+先写一个整数 `data.size()`，表示这个桶里有几条记录；然后把每个 key 和 value 按对象写进去。因为用了对象序列化，本章示例默认 key 和 value 都能被序列化；`String` 和 `Integer` 没问题，如果换成自定义对象，就要自己实现可序列化。现在先关心 Shuffle 的物理过程：谁写、写到哪、谁再读。
 
 ## 6.4 Reduce 端：读属于自己的那批文件
 
@@ -389,6 +454,30 @@ map_2_reduce_1
 ```java
 Map<K, V> merged = readAndMergeReducePartition(reduceId);
 ```
+
+`readMapOutput(...)` 会按 Map 端写入的格式读回来：
+
+```java
+@SuppressWarnings("unchecked")
+private Map<K, V> readMapOutput(int mapId, int reduceId) {
+    File file = mapOutputFile(mapId, reduceId);
+    Map<K, V> result = new HashMap<>();
+    try (ObjectInputStream in = new ObjectInputStream(
+            new BufferedInputStream(new FileInputStream(file)))) {
+        int size = in.readInt();
+        for (int i = 0; i < size; i++) {
+            K key = (K) in.readObject();
+            V value = (V) in.readObject();
+            result.put(key, value);
+        }
+    } catch (IOException | ClassNotFoundException e) {
+        throw new RuntimeException("读取 shuffle 文件失败: " + file, e);
+    }
+    return result;
+}
+```
+
+这里先读 `size`，再循环读取对应数量的 key/value。也就是说，Map 端和 Reduce 端不是靠“猜文件内容”配合，而是共享同一个很小的文件格式。
 
 注意，Reduce 端又用了一次同样的 `merge`。
 
@@ -492,7 +581,19 @@ sequenceDiagram
 
 也就是说，`TaskScheduler` 只知道“有 2 个 Reduce 分区要并行算”。至于第一次进入 `ShuffledRDD.compute()` 时为什么会先写 `3 × 2` 个文件，是 `ShuffledRDD` 在当前结构里的职责。
 
-结果里 key 的顺序不重要。当前实现最后从 `HashMap` 取结果，输出顺序可能和前面列出的期望顺序不同；只要每个 key 的计数对上，就是正确结果。
+结果里 key 的顺序不重要，因为当前实现最后从 `HashMap` 取出结果：
+
+```java
+private Iterator<KeyValuePair<K, V>> toKeyValuePairs(Map<K, V> merged) {
+    List<KeyValuePair<K, V>> result = new ArrayList<>();
+    for (var entry : merged.entrySet()) {
+        result.add(new KeyValuePair<>(entry.getKey(), entry.getValue()));
+    }
+    return result.iterator();
+}
+```
+
+`HashMap.entrySet()` 不承诺固定顺序，所以输出顺序可能和前面列出的期望顺序不同。只要每个 key 的计数对上，就是正确结果。
 
 demo 还会打印 Shuffle 目录：
 
@@ -522,6 +623,30 @@ Shuffle 目录: /var/folders/.../spark-shuffle-...
 
 demo 最后做了一件有点“粗暴”的事：先成功 `collect` 一次，又对同一个 `ShuffledRDD` 再 `collect` 一次，确认它会复用已经写好的中间文件；随后删除刚才那 6 个中间文件，再对同一个 `ShuffledRDD` 第三次 `collect`。
 
+对应代码在 `Main.java` 里：
+
+```java
+System.out.println("=== 6. 再次 collect ===");
+System.out.println("再次 collect 成功: " + shuffled.collect());
+
+System.out.println("=== 7. 删除中间文件后再次 collect ===");
+if (files != null) {
+    for (File file : files) {
+        file.delete();
+    }
+}
+dir.delete();
+try {
+    shuffled.collect();
+    System.out.println("（不应该走到这里）");
+} catch (RuntimeException e) {
+    String message = e.getCause() != null
+            ? e.getCause().getMessage()
+            : e.getMessage();
+    System.out.println("失败: " + message);
+}
+```
+
 第三次会失败。
 
 这不是 bug。恰恰相反，它说明我们真的写出了 Shuffle。
@@ -543,23 +668,84 @@ Shuffle 不是一个抽象名词。
 
 ## 6.7 从哈希分桶到 Partitioner
 
-最后回头看这行代码：
+6.3 里已经用 `partition(...)` 完成了哈希分桶：
 
 ```java
-(key.hashCode() & Integer.MAX_VALUE) % numPartitions
+int bucketId = partition(kv.key(), numReducePartitions);
 ```
 
-它决定每个 key 进入哪个 Reduce 分区。这个“决定 key 去哪”的规则，有一个正式名字：**Partitioner**。
+当时只关心一个直接问题：当前 key 应该写进哪个桶。现在再往前走一步，会发现这里其实包含一套完整的**分区规则**：
 
-本章没有把它抽成一个独立类。现在如果立刻引入 `Partitioner`、`ShuffleManager`、`PairRDD`，代码会变得比问题本身还大。我们先把硬编码版跑通，让读者看见最小的物理过程。
+```text
+输入：一个 key
+规则：对 key 计算哈希值
+输出：0 到 numPartitions - 1 之间的分区编号
+```
 
-但这个名字值得先记住。
+这套“给定 key，返回分区编号”的规则叫作 **Partitioner**。它不只包含哈希计算，还要知道一共有多少个分区。把这两个部分合在一起，它的形状大致如下：
 
-如果两个 RDD 使用同一个 Partitioner，并且 Reduce 分区数也相同，那么相同 key 会天然落到同一个分区里。将来做 join 时，它们可能就不需要再次 Shuffle。
+```java
+interface Partitioner {
+    int numPartitions();
 
-这叫 co-partitioning。它不是本章要实现的功能，只是一颗伏笔。先记住这句话就够了：
+    int getPartition(Object key);
+}
+```
 
-> Shuffle 的核心是按 key 重新分布；如果数据已经按同一套规则分好了，就可以少搬一次。
+当前实现只有一种哈希分区规则，所以用一个静态方法就够了：
+
+```java
+static int partition(Object key, int numPartitions) {
+    return (key.hashCode() & Integer.MAX_VALUE) % numPartitions;
+}
+```
+
+这里的两个运算各有作用：
+
+- `& Integer.MAX_VALUE` 清掉符号位，把可能为负数的哈希值变成非负数。
+- `% numPartitions` 再把这个非负数压到 `0` 到 `numPartitions - 1` 的范围内。
+
+因此，只要 key 和分区数不变，算出的分区编号就不会变。不过，这个公式只保证“相同 key 去同一个分区”，不保证每个分区的数据量一定相等；数据是否均匀，还取决于 key 的哈希值分布。
+
+当前 `ShuffledRDD` 会按照这套规则写文件，但规则只存在于计算过程里。计算结束后，下游 RDD 只能看到“这里有 2 个分区”，却不知道这 2 个分区是不是按 key 哈希得到的。
+
+如果把 `Partitioner` 记录在 RDD 上，下游算子就能判断：这份数据是否已经按照自己需要的规则分好了。`Partitioner` 的价值不只是给一行取模代码起名字，更重要的是保存数据当前的分布方式。
+
+> [!INFO]
+> **Spark 为什么要让 RDD 记住 Partitioner？**
+>
+> 键值对 RDD 可以带有一个可选的 `partitioner`。`reduceByKey`、`partitionBy` 这类操作完成 Shuffle 后，会把所用的分区器记录在结果 RDD 上。
+>
+> `join` 需要把两个 RDD 中相同的 key 放到一起。它会先确定一个目标 `Partitioner`，再分别检查两个父 RDD：
+>
+> ```java
+> if (parent.partitioner().equals(targetPartitioner)) {
+>     // 第 i 个子分区直接读取第 i 个父分区
+>     addOneToOneDependency(parent);
+> } else {
+>     // 先按目标分区器重新分布
+>     addShuffleDependency(parent, targetPartitioner);
+> }
+> ```
+>
+> 例如，join 之前，两份数据都做过相同分区数的 `reduceByKey`：
+>
+> ```java
+> RDD<KeyValuePair<String, Integer>> left =
+>         leftInput.reduceByKey(Integer::sum, 2);
+> RDD<KeyValuePair<String, Integer>> right =
+>         rightInput.reduceByKey(Integer::sum, 2);
+>
+> left.join(right);
+> ```
+>
+> 两次 `reduceByKey` 都使用“2 个分区的哈希分区器”。经过前面的 Shuffle，`left` 和 `right` 中相同的 key 已经位于编号相同的分区。`join` 只需让第 i 个子分区读取两边的第 i 个父分区，不必再把两份数据重新 Shuffle 一遍。
+>
+> 如果只有 `left` 做过 `reduceByKey`，那么 `left` 的分区结果仍然可以复用，但 `right` 还要经过一次 Shuffle。如果两边使用的分区数或分区规则不同，也不能直接逐分区 join。
+>
+> 多个 RDD 已经按照同一个 `Partitioner` 排列的状态，叫作 **co-partitioning**。它的作用不是让所有 Shuffle 消失，而是让系统识别出哪些父 RDD 已经满足分布要求，只重新分布不满足要求的那一部分。
+
+现在可以更准确地理解 `Partitioner`：它既负责计算 key 的目标分区，也让后续算子知道这次分区结果能不能继续使用。
 
 ## 6.8 本章小结
 

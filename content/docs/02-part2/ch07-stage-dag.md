@@ -483,20 +483,24 @@ public <T, U> List<U> runJob(
 进入 `runJob(finalStage, taskScheduler, partitionFunction)` 后，会调用 `submitStage()`：
 
 ```java
-private <T> List<T> submitStage(
+private <T, U> List<U> submitStage(
         Stage stage,
         TaskScheduler taskScheduler,
+        Function<List<T>, U> partitionFunction,
         Set<Integer> finishedStages) {
     if (stage.shuffleMap()) {
-        submitShuffleMapStage(stage, finishedStages);
+        submitShuffleMapStage(stage, taskScheduler, finishedStages);
         return List.of();
     }
 
     for (Stage parent : stage.parents()) {
-        submitShuffleMapStage(parent, finishedStages);
+        submitShuffleMapStage(parent, taskScheduler, finishedStages);
     }
 
-    return submitMissingTasks(stage, taskScheduler);
+    if (verbose) {
+        System.out.println("提交 " + stage);
+    }
+    return submitMissingTasks(stage, taskScheduler, partitionFunction);
 }
 ```
 
@@ -509,17 +513,17 @@ private <T> List<T> submitStage(
 第三，父 Stage 都完成以后，才提交当前 Stage 的任务：
 
 ```java
-return submitMissingTasks(stage, taskScheduler);
+return submitMissingTasks(stage, taskScheduler, partitionFunction);
 ```
 
 `submitMissingTasks()` 的意思很直接：一个 Stage 已经确定了，现在要把这个 Stage 里还没完成的分区任务提交出去。这里会出现两类任务：
 
 ```text
 ShuffleMapStage -> ShuffleMapTask
-ResultStage     -> ResultTask
+ResultStage     -> CollectTask
 ```
 
-这里先实现 `ShuffleMapTask`，让 Map 输出不再由 `ShuffledRDD.compute()` 临时补写。`ResultStage` 仍然复用前面写过的 `CollectTask`，它已经能表达“每个结果分区一个任务”的结构。
+`ShuffleMapTask` 写 Map 输出，`CollectTask` 读取最终 RDD 的一个结果分区。这样 Map 输出不再由 `ShuffledRDD.compute()` 临时补写，ResultStage 也仍然保持“每个结果分区一个任务”的结构。
 
 对于 `ResultStage`，提交任务就是调用 `TaskScheduler.collectPartitions()`：
 
@@ -531,7 +535,7 @@ private <T, U> List<U> submitMissingTasks(
     List<List<T>> partitions =
             taskScheduler.collectPartitions((RDD<T>) stage.rdd());
 
-    List<U> result = new ArrayList<>();
+    List<U> result = new java.util.ArrayList<>();
     for (List<T> partition : partitions) {
         result.add(partitionFunction.apply(partition));
     }
@@ -540,6 +544,26 @@ private <T, U> List<U> submitMissingTasks(
 ```
 
 这里的 `stage.rdd()` 就是最终的 `ShuffledRDD`。`TaskScheduler.collectPartitions()` 会为它的每个 Reduce 分区创建 `CollectTask`，交给线程池执行；每个分区返回一个 `List<T>`。随后 `partitionFunction` 再把每个分区结果变成 action 需要的返回值。
+
+对应的 `collectPartitions()` 是：
+
+```java
+public <T> List<List<T>> collectPartitions(RDD<T> rdd) {
+    Objects.requireNonNull(rdd, "rdd");
+
+    List<Future<List<T>>> futures = new ArrayList<>();
+    for (Partition partition : rdd.partitions()) {
+        futures.add(executor.submit(
+                new CollectTask<>(rdd, partition, verbose)));
+    }
+
+    List<List<T>> result = new ArrayList<>();
+    for (Future<List<T>> future : futures) {
+        result.add(await(future));
+    }
+    return result;
+}
+```
 
 对 `collect()` 来说，`partitionFunction` 只是 `List::copyOf`，最后 `RDD.collect()` 再把这些分区 List 合并成一个总 List。这里的 `CollectTask` 先承担 ResultStage 的分区计算。
 
@@ -557,8 +581,17 @@ private void submitShuffleMapStage(
     for (Stage parent : stage.parents()) {
         submitShuffleMapStage(parent, taskScheduler, finishedStages);
     }
+    if (!stage.shuffleMap()) {
+        throw new IllegalArgumentException("stage must be a ShuffleMapStage");
+    }
 
+    if (verbose) {
+        System.out.println("提交 " + stage);
+    }
     submitMissingTasks(stage, taskScheduler);
+    if (verbose) {
+        System.out.println("  shuffle map 输出已写入磁盘");
+    }
 }
 ```
 
@@ -620,6 +653,24 @@ public Void call() {
 }
 ```
 
+写文件的方法和上一章的文件格式保持一致：先写条数，再写每个 key/value。
+
+```java
+private void writeMapOutput(int mapId, int reduceId, Map<K, V> data) {
+    File file = dependency.mapOutputFile(mapId, reduceId);
+    try (ObjectOutputStream out = new ObjectOutputStream(
+            new BufferedOutputStream(new FileOutputStream(file)))) {
+        out.writeInt(data.size());
+        for (var entry : data.entrySet()) {
+            out.writeObject(entry.getKey());
+            out.writeObject(entry.getValue());
+        }
+    } catch (IOException e) {
+        throw new UncheckedIOException("写入 shuffle 文件失败: " + file, e);
+    }
+}
+```
+
 到这里，职责的迁移就完整了：
 
 | 阶段 | 写 shuffle 文件的位置 | 解决的问题 |
@@ -629,6 +680,35 @@ public Void call() {
 | 当前结构 | 每个 Map 分区一个 `ShuffleMapTask` | 让 Stage 最终落到一批可并行的 Task 上 |
 
 所以 `ShuffledRDD` 仍然存在，但它的职责已经变窄：它代表 shuffle 之后的 RDD，并在 Reduce 阶段读取 map 输出；写 map 输出这件事，交给 `ShuffleMapTask`。
+
+对应到 `ShuffledRDD.compute()`，代码里已经没有“补写 Map 输出”的动作：
+
+```java
+@Override
+public Iterator<KeyValuePair<K, V>> compute(Partition partition) {
+    Objects.requireNonNull(partition, "partition");
+    if (partition.index() < 0 || partition.index() >= partitions.size()) {
+        throw new IllegalArgumentException("unknown partition: " + partition);
+    }
+
+    return toKeyValuePairs(readAndMergeReducePartition(partition.index()));
+}
+```
+
+它只读取当前 Reduce 分区需要的 Map 输出，并合并相同 key：
+
+```java
+private Map<K, V> readAndMergeReducePartition(int reduceId) {
+    Map<K, V> merged = new HashMap<>();
+    for (int mapId = 0; mapId < numMapPartitions; mapId++) {
+        Map<K, V> mapOutput = readMapOutput(mapId, reduceId);
+        for (var entry : mapOutput.entrySet()) {
+            merged.merge(entry.getKey(), entry.getValue(), reduceFunc);
+        }
+    }
+    return merged;
+}
+```
 
 到这里，两个调度器的分工就清楚了：
 
@@ -695,7 +775,19 @@ ResultStage 1 (rdd=ShuffledRDD, parents=[0])
 
 随后底层的 `TaskScheduler` 启动 `ShuffledRDD` 的 Reduce 分区任务，读文件并返回结果。用户侧只写了 `shuffled.collect()`。
 
-结果里 key 的顺序仍然不重要，因为最后从 `HashMap` 取出结果。只要计数对上即可：
+结果里 key 的顺序仍然不重要，因为最后仍然是从 `HashMap` 转成结果列表：
+
+```java
+private Iterator<KeyValuePair<K, V>> toKeyValuePairs(Map<K, V> merged) {
+    List<KeyValuePair<K, V>> result = new ArrayList<>();
+    for (var entry : merged.entrySet()) {
+        result.add(new KeyValuePair<>(entry.getKey(), entry.getValue()));
+    }
+    return result.iterator();
+}
+```
+
+只要计数对上即可：
 
 ```text
 hello -> 4
