@@ -8,8 +8,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -30,23 +30,19 @@ final class TaskSchedulerTest {
     }
 
     @Test
-    void parallelCollectKeepsPartitionOrder() {
+    void parallelTasksKeepSubmissionOrder() {
         CountDownLatch laterPartitionsFinished = new CountDownLatch(2);
         List<Integer> computationOrder = Collections.synchronizedList(new ArrayList<>());
-        try (SparkContext sc = new SparkContext(3);
-             TaskScheduler scheduler = new TaskScheduler(3)) {
-            RDD<Integer> rdd = sc.parallelize(List.of(1, 2, 3), 3)
-                    .map(number -> {
-                        if (number == 1) {
-                            awaitLatch(laterPartitionsFinished, "later partitions did not finish first");
-                        }
-                        computationOrder.add(number);
-                        if (number != 1) {
-                            laterPartitionsFinished.countDown();
-                        }
-                        return number * 10;
-                    });
-            assertEquals(List.of(10, 20, 30), scheduler.collect(rdd));
+        try (TaskScheduler scheduler = new TaskScheduler(3)) {
+            List<Callable<Integer>> tasks = List.of(
+                    () -> runOrderedTask(
+                            1, laterPartitionsFinished, computationOrder),
+                    () -> runOrderedTask(
+                            2, laterPartitionsFinished, computationOrder),
+                    () -> runOrderedTask(
+                            3, laterPartitionsFinished, computationOrder));
+
+            assertEquals(List.of(10, 20, 30), scheduler.submitTasks(tasks));
         }
         assertEquals(1, computationOrder.get(2));
         assertNotEquals(1, computationOrder.get(0));
@@ -54,40 +50,30 @@ final class TaskSchedulerTest {
     }
 
     @Test
-    void parallelCollectRunsPartitionsConcurrently() {
+    void submitTasksRunsTasksConcurrently() {
         CountDownLatch allPartitionsStarted = new CountDownLatch(4);
         Set<String> workerThreads = ConcurrentHashMap.newKeySet();
 
-        try (SparkContext sc = new SparkContext(4);
-             TaskScheduler scheduler = new TaskScheduler(4)) {
-            RDD<Integer> rdd = sc.parallelize(List.of(1, 2, 3, 4), 4)
-                    .map(number -> {
-                        workerThreads.add(Thread.currentThread().getName());
-                        allPartitionsStarted.countDown();
-                        awaitAllPartitions(allPartitionsStarted);
-                        return number;
-                    });
-            assertEquals(List.of(1, 2, 3, 4), scheduler.collect(rdd));
+        try (TaskScheduler scheduler = new TaskScheduler(4)) {
+            List<Callable<Integer>> tasks = List.of(
+                    () -> runConcurrentTask(1, allPartitionsStarted, workerThreads),
+                    () -> runConcurrentTask(2, allPartitionsStarted, workerThreads),
+                    () -> runConcurrentTask(3, allPartitionsStarted, workerThreads),
+                    () -> runConcurrentTask(4, allPartitionsStarted, workerThreads));
+
+            assertEquals(List.of(1, 2, 3, 4), scheduler.submitTasks(tasks));
         }
         assertEquals(4, workerThreads.size());
     }
 
     @Test
-    void countAndReduceMergePartitionResults() {
-        try (SparkContext sc = new SparkContext(3);
-             TaskScheduler scheduler = new TaskScheduler(3)) {
-            RDD<Integer> rdd = sc.parallelize(Arrays.asList(1, 2, 3, 4, 5), 3);
-            assertEquals(5, scheduler.count(rdd));
-            assertEquals(15, scheduler.reduce(rdd, Integer::sum));
-        }
-    }
-
-    @Test
-    void reduceOnEmptyRddFailsClearly() {
-        try (SparkContext sc = new SparkContext(3);
-             TaskScheduler scheduler = new TaskScheduler(3)) {
-            RDD<Integer> rdd = sc.parallelize(List.of(), 3);
-            assertThrows(NoSuchElementException.class, () -> scheduler.reduce(rdd, Integer::sum));
+    void taskFailureIsReported() {
+        try (TaskScheduler scheduler = new TaskScheduler(1)) {
+            List<Callable<Integer>> tasks = List.of(
+                    () -> {
+                        throw new IllegalArgumentException("boom");
+                    });
+            assertThrows(IllegalStateException.class, () -> scheduler.submitTasks(tasks));
         }
     }
 
@@ -100,6 +86,30 @@ final class TaskSchedulerTest {
         List<T> result = new ArrayList<>();
         rdd.iterator(partition).forEachRemaining(result::add);
         return result;
+    }
+
+    private static int runOrderedTask(
+            int number,
+            CountDownLatch laterPartitionsFinished,
+            List<Integer> computationOrder) {
+        if (number == 1) {
+            awaitLatch(laterPartitionsFinished, "later tasks did not finish first");
+        }
+        computationOrder.add(number);
+        if (number != 1) {
+            laterPartitionsFinished.countDown();
+        }
+        return number * 10;
+    }
+
+    private static int runConcurrentTask(
+            int number,
+            CountDownLatch allPartitionsStarted,
+            Set<String> workerThreads) {
+        workerThreads.add(Thread.currentThread().getName());
+        allPartitionsStarted.countDown();
+        awaitAllPartitions(allPartitionsStarted);
+        return number;
     }
 
     private static void awaitAllPartitions(CountDownLatch allPartitionsStarted) {

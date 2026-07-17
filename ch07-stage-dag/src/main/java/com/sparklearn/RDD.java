@@ -100,7 +100,8 @@ public abstract class RDD<T> {
      * 遍历所有分区，把结果逐个收集到内存。
      */
     public List<T> collect() {
-        List<List<T>> partitionResults = sparkContext.runJob(this, List::copyOf);
+        List<List<T>> partitionResults =
+                sparkContext.runJob(this, RDD::collectPartition);
         List<T> result = new ArrayList<>();
         for (List<T> partitionResult : partitionResults) {
             result.addAll(partitionResult);
@@ -113,7 +114,7 @@ public abstract class RDD<T> {
      */
     public long count() {
         List<Long> partitionCounts =
-                sparkContext.runJob(this, partition -> (long) partition.size());
+                sparkContext.runJob(this, RDD::countPartition);
         long total = 0;
         for (long partitionCount : partitionCounts) {
             total += partitionCount;
@@ -127,7 +128,7 @@ public abstract class RDD<T> {
     public T reduce(BinaryOperator<T> operator) {
         Objects.requireNonNull(operator, "operator");
         List<PartitionResult<T>> partitionResults =
-                sparkContext.runJob(this, partition -> reducePartition(partition, operator));
+                sparkContext.runJob(this, iterator -> reducePartition(iterator, operator));
 
         T result = null;
         boolean hasResult = false;
@@ -149,16 +150,31 @@ public abstract class RDD<T> {
         return result;
     }
 
+    private static <T> List<T> collectPartition(Iterator<T> iterator) {
+        List<T> result = new ArrayList<>();
+        iterator.forEachRemaining(result::add);
+        return result;
+    }
+
+    private static long countPartition(Iterator<?> iterator) {
+        long count = 0;
+        while (iterator.hasNext()) {
+            iterator.next();
+            count++;
+        }
+        return count;
+    }
+
     private static <T> PartitionResult<T> reducePartition(
-            List<T> partition,
+            Iterator<T> iterator,
             BinaryOperator<T> operator) {
-        if (partition.isEmpty()) {
+        if (!iterator.hasNext()) {
             return PartitionResult.empty();
         }
 
-        T result = partition.get(0);
-        for (int i = 1; i < partition.size(); i++) {
-            result = operator.apply(result, partition.get(i));
+        T result = iterator.next();
+        while (iterator.hasNext()) {
+            result = operator.apply(result, iterator.next());
         }
         return PartitionResult.of(result);
     }

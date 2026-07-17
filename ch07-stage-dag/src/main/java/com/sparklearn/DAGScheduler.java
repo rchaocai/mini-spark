@@ -1,6 +1,8 @@
 package com.sparklearn;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
@@ -12,8 +14,8 @@ import java.util.function.Function;
 /**
  * DAGScheduler：沿 RDD 血缘回溯，遇到 ShuffleDependency 就切出新的 Stage。
  *
- * <p>TaskScheduler 只关心“一个 RDD 的所有分区怎么并行跑”。DAGScheduler
- * 先关心更上层的问题：哪些分区任务必须先跑完，哪些任务可以等中间文件就绪后再跑。
+ * <p>DAGScheduler 决定哪些 Stage 必须先完成，并为 Stage 的分区创建 Task；
+ * TaskScheduler 只负责把这些 Task 提交到线程池。
  */
 public final class DAGScheduler {
 
@@ -39,7 +41,7 @@ public final class DAGScheduler {
     public <T, U> List<U> runJob(
             RDD<T> finalRdd,
             TaskScheduler taskScheduler,
-            Function<List<T>, U> partitionFunction) {
+            Function<Iterator<T>, U> partitionFunction) {
         Objects.requireNonNull(finalRdd, "finalRdd");
         Objects.requireNonNull(taskScheduler, "taskScheduler");
         Objects.requireNonNull(partitionFunction, "partitionFunction");
@@ -59,7 +61,7 @@ public final class DAGScheduler {
     public <T, U> List<U> runJob(
             Stage finalStage,
             TaskScheduler taskScheduler,
-            Function<List<T>, U> partitionFunction) {
+            Function<Iterator<T>, U> partitionFunction) {
         Objects.requireNonNull(finalStage, "finalStage");
         Objects.requireNonNull(taskScheduler, "taskScheduler");
         Objects.requireNonNull(partitionFunction, "partitionFunction");
@@ -118,13 +120,8 @@ public final class DAGScheduler {
     private <T, U> List<U> submitStage(
             Stage stage,
             TaskScheduler taskScheduler,
-            Function<List<T>, U> partitionFunction,
+            Function<Iterator<T>, U> partitionFunction,
             Set<Integer> finishedStages) {
-        if (stage.shuffleMap()) {
-            submitShuffleMapStage(stage, taskScheduler, finishedStages);
-            return List.of();
-        }
-
         for (Stage parent : stage.parents()) {
             submitShuffleMapStage(parent, taskScheduler, finishedStages);
         }
@@ -163,29 +160,43 @@ public final class DAGScheduler {
     private <T, U> List<U> submitMissingTasks(
             Stage stage,
             TaskScheduler taskScheduler,
-            Function<List<T>, U> partitionFunction) {
+            Function<Iterator<T>, U> partitionFunction) {
         if (stage.shuffleMap()) {
             throw new IllegalArgumentException("result stage expected");
         }
         if (verbose) {
             System.out.println("  提交 ResultStage 的分区任务");
         }
-        List<List<T>> partitions = taskScheduler.collectPartitions((RDD<T>) stage.rdd());
-        List<U> result = new java.util.ArrayList<>();
-        for (List<T> partition : partitions) {
-            result.add(partitionFunction.apply(partition));
+        RDD<T> rdd = (RDD<T>) stage.rdd();
+        List<ResultTask<T, U>> tasks = new ArrayList<>();
+        for (Partition partition : rdd.partitions()) {
+            tasks.add(new ResultTask<>(
+                    rdd, partition, partitionFunction, verbose));
         }
-        return result;
+        return taskScheduler.submitTasks(tasks);
     }
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
     private void submitMissingTasks(Stage stage, TaskScheduler taskScheduler) {
         if (!stage.shuffleMap()) {
             throw new IllegalArgumentException("shuffle map stage expected");
         }
-        ShuffleDependency dependency = stage.shuffleDependency()
+        ShuffleDependency<?, ?> dependency = stage.shuffleDependency()
                 .orElseThrow(() -> new IllegalStateException("missing shuffle dependency"));
-        taskScheduler.runShuffleMapTasks((RDD) stage.rdd(), dependency);
+        submitShuffleMapTasks(stage, taskScheduler, dependency);
+    }
+
+    @SuppressWarnings("unchecked")
+    private <K, V> void submitShuffleMapTasks(
+            Stage stage,
+            TaskScheduler taskScheduler,
+            ShuffleDependency<K, V> dependency) {
+        RDD<KeyValuePair<K, V>> rdd =
+                (RDD<KeyValuePair<K, V>>) stage.rdd();
+        List<ShuffleMapTask<K, V>> tasks = new ArrayList<>();
+        for (Partition partition : rdd.partitions()) {
+            tasks.add(new ShuffleMapTask<>(rdd, partition, dependency));
+        }
+        taskScheduler.submitTasks(tasks);
     }
 
     private void printStage(Stage stage, int indent) {

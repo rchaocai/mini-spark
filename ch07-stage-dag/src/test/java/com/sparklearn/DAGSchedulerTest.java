@@ -57,6 +57,16 @@ final class DAGSchedulerTest {
         }
     }
 
+    @Test
+    void resultTasksApplyTheActionFunctionPerPartition() {
+        try (SparkContext sc = new SparkContext(3)) {
+            RDD<Integer> rdd = sc.parallelize(List.of(1, 2, 3, 4, 5), 3);
+
+            assertEquals(5, rdd.count());
+            assertEquals(15, rdd.reduce(Integer::sum));
+        }
+    }
+
     private static RDD<KeyValuePair<String, Integer>> newSourceRdd(SparkContext sc) {
         List<KeyValuePair<String, Integer>> data = Arrays.asList(
                 new KeyValuePair<>("hello", 1),

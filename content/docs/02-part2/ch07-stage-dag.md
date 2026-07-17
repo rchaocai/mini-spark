@@ -36,7 +36,7 @@ Reduce 端要读文件
 
 调度器先看完整条血缘，发现中间有 Shuffle，就把作业切成两段：先主动触发写文件的那段，再提交读文件的那段。这样以后，`ShuffledRDD.compute()` 只负责 Reduce 端：读取已经存在的文件，并合并相同 key。文件如果不存在，就说明调度顺序错了，不应该由 `compute()` 偷偷补救。
 
-所以本章不是删掉 `ShuffledRDD`。恰恰相反，它仍然是 `reduceByKey` 返回的那个 RDD。变化在于：`ShuffledRDD` 不再负责“什么时候写 Map 输出”，它只说明“我依赖一条 Shuffle 边”，并在自己的 `compute()` 里读取已经写好的 Map 输出。
+`reduceByKey` 仍然返回 `ShuffledRDD`，因为 Shuffle 之后的数据仍然需要一个 RDD 来表示。变化的是它的执行职责：`ShuffledRDD` 不再决定“什么时候写 Map 输出”，只记录自己依赖一条 Shuffle 边，并在 `compute()` 中读取已经写好的 Map 输出。
 
 分工可以整理成三层：
 
@@ -221,18 +221,7 @@ public List<Dependency<?>> dependencies() {
 }
 ```
 
-这段代码把关系写得很清楚：
-
-```text
-ShuffledRDD
-  -> dependencies()
-  -> ShuffleDependency
-  -> parent RDD
-```
-
-这就是为什么第 7 章仍然需要 `ShuffledRDD`。它是 RDD DAG 里的一个节点，代表 shuffle 之后的结果 RDD。如果没有它，`reduceByKey` 就没有返回值，也没有地方保存“下游有几个 Reduce 分区、Reduce 分区如何读文件”这些信息。
-
-但是，写文件的动作不再放在 `ShuffledRDD.compute()` 里。`ShuffleDependency` 只描述这条 shuffle 边需要什么：
+`dependencies()` 返回 `ShuffleDependency`，调度器沿 RDD 血缘回溯时，就能从这里发现 Shuffle 边界。至于 Map 输出该怎样写，则由这条依赖保存所需信息：
 
 ```java
 public final class ShuffleDependency<K, V>
@@ -292,6 +281,67 @@ public record Stage(
 
 `shuffleDependency` 只在 `ShuffleMapStage` 上有值。因为只有 ShuffleMapStage 需要写出 shuffle 文件，ResultStage 只需要读取最终结果。
 
+不过，`ResultStage` 只记录了最终要计算哪个 RDD，还没有说明“计算完一个分区以后，要返回什么”。
+
+同一个 RDD 可以调用不同的 action：
+
+```java
+rdd.collect();
+rdd.count();
+rdd.reduce(Integer::sum);
+```
+
+三种 action 计算的是同一条 RDD 血缘，区别只发生在最后一步：
+
+| action | 拿到一个最终分区后做什么 | 单个分区的返回值 |
+|---|---|---|
+| `collect()` | 把迭代器中的元素放进 List | `List<T>` |
+| `count()` | 一边遍历，一边计数 | `Long` |
+| `reduce()` | 一边遍历，一边用 operator 合并 | `PartitionResult<T>` |
+
+因此，`SparkContext.runJob(...)` 除了接收最终 RDD，还要接收一个**分区函数**：
+
+```java
+public <T, U> List<U> runJob(
+        RDD<T> rdd,
+        Function<Iterator<T>, U> partitionFunction) {
+    return dagScheduler.runJob(rdd, taskScheduler, partitionFunction);
+}
+```
+
+它的输入是最终 RDD 一个分区的 `Iterator<T>`，输出是这个分区交给 action 的结果 `U`。三个 action 只是传入不同的分区函数：
+
+```java
+// collect：当前分区 -> 元素列表
+sparkContext.runJob(this, RDD::collectPartition);
+
+// count：当前分区 -> 元素个数
+sparkContext.runJob(this, RDD::countPartition);
+
+// reduce：当前分区 -> 局部合并结果
+sparkContext.runJob(
+        this, iterator -> reducePartition(iterator, operator));
+```
+
+这里没有要求所有 action 都先把分区收集成 List。`collect()` 本来就要把数据带回调用端，所以它的分区函数会创建 List；`count()` 和 `reduce()` 可以直接消费迭代器，不需要额外保存整个分区。
+
+> [!INFO]
+> **为什么 ResultTask 不先把分区收集成 List？**
+>
+> 因为“把分区变成 List”只是 `collect()` 的需要，不是所有 action 的共同需要。
+>
+> 如果由 `ResultTask` 统一收集，那么 `count()` 明明只需要一个计数器，也要先把整个分区放进内存；`reduce()` 明明可以读一条合并一条，也要额外保存所有元素。
+>
+> 让分区函数直接接收 `Iterator<T>` 后，选择权回到 action：
+>
+> ```text
+> collect：Iterator<T> -> List<T>
+> count：  Iterator<T> -> Long
+> reduce： Iterator<T> -> PartitionResult<T>
+> ```
+>
+> 因此，使用迭代器并不表示 `collect()` 不再收集数据。它只是把“是否需要收集”推迟到具体 action 决定，避免其他 action 支付不必要的内存成本。
+
 最后看调度器如何把依赖变成 Stage：
 
 ```java
@@ -331,30 +381,60 @@ private Stage newShuffleMapStage(ShuffleDependency<?, ?> dependency) {
 }
 ```
 
-这就是 `RDD`、`Dependency`、`Stage` 的连接点：
+把 Stage 的创建和执行放到同一条时间线上，关系会更直观：
 
-```text
-ShuffledRDD.dependencies()
-  -> 返回 ShuffleDependency
-DAGScheduler.visit()
-  -> 看到 ShuffleDependency
-  -> 创建 ShuffleMapStage
-Stage.shuffleDependency()
-  -> 保存这条 ShuffleDependency，后面用它写文件
+```mermaid
+sequenceDiagram
+    participant U as 用户代码
+    participant R as ShuffledRDD
+    participant SC as SparkContext
+    participant D as DAGScheduler
+    participant TS as TaskScheduler
+    participant T as 分区任务
+    participant F as shuffle 文件
+
+    U->>R: collect()
+    R->>SC: runJob(this, partitionFunction)
+    SC->>D: runJob(finalRdd, taskScheduler, partitionFunction)
+
+    Note over R,D: 先沿 RDD 血缘创建 Stage
+    D->>R: dependencies()
+    R-->>D: ShuffleDependency
+    Note over D: 创建 ShuffleMapStage<br/>并保存 ShuffleDependency
+    Note over D: 创建下游 ResultStage
+
+    Note over D,F: 先执行 ShuffleMapStage
+    loop 每个 Map 分区
+        D->>D: 创建 ShuffleMapTask(mapId)
+    end
+    D->>TS: submitTasks(shuffleMapTasks)
+    loop 每个 ShuffleMapTask
+        TS->>T: 提交到线程池
+        T->>F: 写出当前 Map 分区的各个桶文件
+    end
+    TS-->>D: 所有 Map 任务完成
+
+    Note over D,F: 再执行 ResultStage
+    loop 每个 Reduce 分区
+        D->>D: 创建 ResultTask(reduceId)
+    end
+    D->>TS: submitTasks(resultTasks)
+    loop 每个 ResultTask
+        TS->>T: 提交到线程池
+        T->>R: compute(reduceId)
+        R->>F: 读取属于 reduceId 的 Map 输出
+        F-->>R: 返回 Map 输出
+        R-->>T: 返回当前 Reduce 分区结果
+    end
+    TS-->>D: 返回所有分区结果
+    D-->>SC: 返回 action 结果
+    SC-->>R: 返回各分区结果
+    R-->>U: collect() 合并并返回
 ```
 
-这样，正常执行路径就变成：
+时序图的前半段只是在创建 Stage，还没有运行分区任务。`DAGScheduler` 从 `ShuffledRDD.dependencies()` 取得 `ShuffleDependency`，把它保存在 `ShuffleMapStage` 中。
 
-```text
-RDD.collect()
-  -> SparkContext.runJob()
-  -> DAGScheduler.runJob()
-DAGScheduler 先提交 ShuffleMapStage
-  -> 写出 map_*_reduce_* 文件
-DAGScheduler 再提交 ResultStage
-  -> TaskScheduler 提交 ShuffledRDD 的 Reduce 分区任务
-  -> Reduce 分区读取已经存在的文件
-```
+真正执行时，`DAGScheduler` 把 `ShuffleMapStage` 展开成一批 `ShuffleMapTask`，把 `ResultStage` 展开成一批 `ResultTask`。`TaskScheduler` 不再判断应该创建哪种任务，只负责把收到的任务提交到线程池。
 
 注意，`ShuffledRDD.compute()` 不再补做 Map 端落盘。它的职责变窄了：只读取当前 Reduce 分区需要的 `map_*_reduce_i` 文件。写文件这一步已经被 Stage 调度提前完成。
 
@@ -427,72 +507,23 @@ Stage 1: ShuffledRDD
 
 ## 7.5 先跑父 Stage，再跑子 Stage
 
-Stage 切出来以后，还差最后一步：提交执行。
-
-这里分成两个动作：先提交 Stage，再提交这个 Stage 里尚未完成的分区任务。
-
-先把一次 `shuffled.collect()` 拆成五步：
+Stage 树已经切出来了：
 
 ```text
-1. RDD.collect() 调用 SparkContext.runJob(...)
-2. SparkContext.runJob(...) 把最终 RDD 交给 DAGScheduler.runJob(...)
-3. DAGScheduler 创建最终的 ResultStage
-4. submitStage(ResultStage)，先提交父 ShuffleMapStage
-5. 父 Stage 完成后，再提交 ResultStage 的分区任务
+ResultStage（计算 ShuffledRDD）
+  └─ ShuffleMapStage（计算 MapPartitionsRDD）
 ```
 
-注意第 3 步。`DAGScheduler` 自己不负责跑每一个分区。它只决定“哪个 Stage 先提交，哪个 Stage 后提交”。真正把分区交给线程池的，仍然是 `TaskScheduler`。
+现在只看一个问题：调用 `submitStage(ResultStage)` 后，代码怎样保证父 Stage 完成以前，ResultStage 的任务不会开始？
 
-入口在 `RDD.collect()`：
-
-```java
-public List<T> collect() {
-    List<List<T>> partitionResults = sparkContext.runJob(this, List::copyOf);
-    List<T> result = new ArrayList<>();
-    for (List<T> partitionResult : partitionResults) {
-        result.addAll(partitionResult);
-    }
-    return result;
-}
-```
-
-action 本身不直接遍历分区，而是把作业交给 `SparkContext.runJob(...)`。`List::copyOf` 表示“每个分区返回一个自己的 List”。等所有分区都结束以后，`RDD.collect()` 再把这些 List 合并成一个总 List。
-
-`SparkContext` 再把最终 RDD 交给 `DAGScheduler`：
-
-```java
-public <T, U> List<U> runJob(
-        RDD<T> rdd,
-        Function<List<T>, U> partitionFunction) {
-    return dagScheduler.runJob(rdd, taskScheduler, partitionFunction);
-}
-```
-
-进入 `DAGScheduler.runJob()` 后，才把最终 RDD 变成 `ResultStage`：
-
-```java
-public <T, U> List<U> runJob(
-        RDD<T> finalRdd,
-        TaskScheduler taskScheduler,
-        Function<List<T>, U> partitionFunction) {
-    Stage finalStage = createResultStage(finalRdd);
-    return runJob(finalStage, taskScheduler, partitionFunction);
-}
-```
-
-进入 `runJob(finalStage, taskScheduler, partitionFunction)` 后，会调用 `submitStage()`：
+入口就是 `submitStage()`：
 
 ```java
 private <T, U> List<U> submitStage(
         Stage stage,
         TaskScheduler taskScheduler,
-        Function<List<T>, U> partitionFunction,
+        Function<Iterator<T>, U> partitionFunction,
         Set<Integer> finishedStages) {
-    if (stage.shuffleMap()) {
-        submitShuffleMapStage(stage, taskScheduler, finishedStages);
-        return List.of();
-    }
-
     for (Stage parent : stage.parents()) {
         submitShuffleMapStage(parent, taskScheduler, finishedStages);
     }
@@ -504,70 +535,103 @@ private <T, U> List<U> submitStage(
 }
 ```
 
-这段代码分三步看。
+把当前 Stage 树代入这段代码，可以得到一张更小的时序图：
 
-第一，如果传进来的是 `ShuffleMapStage`，就去提交 ShuffleMapStage。当前入口传的是最终 Stage，所以这条分支主要是为了让方法语义完整。
+```mermaid
+sequenceDiagram
+    participant D as DAGScheduler
+    participant TS as TaskScheduler
+    participant M as ShuffleMapTask
+    participant F as shuffle 文件
+    participant R as ResultTask
 
-第二，遍历 `stage.parents()`。如果父 Stage 还没完成，就先提交父 Stage。对于 `ShuffledRDD` 来说，父 Stage 就是写 shuffle 文件的那一段。
+    D->>D: submitStage(ResultStage)
+    D->>D: submitShuffleMapStage(ShuffleMapStage)
 
-第三，父 Stage 都完成以后，才提交当前 Stage 的任务：
+    loop 每个 Map 分区
+        D->>D: new ShuffleMapTask(...)
+    end
+    D->>TS: submitTasks(shuffleMapTasks)
+
+    loop 每个 ShuffleMapTask
+        TS->>M: executor.submit(task)
+        M-->>TS: Future
+    end
+
+    Note over M,F: 多个 ShuffleMapTask 在线程池中并行写文件
+    M->>F: 各自写出当前 Map 分区的桶
+
+    loop 每个 Future
+        TS->>TS: await(future)
+        M-->>TS: 对应 Map 任务完成
+    end
+
+    TS-->>D: submitTasks() 返回
+    Note over D,F: 此时 Map 输出已经全部写完
+
+    D->>D: submitMissingTasks(ResultStage)
+
+    loop 每个 Reduce 分区
+        D->>D: new ResultTask(...)
+    end
+    D->>TS: submitTasks(resultTasks)
+
+    loop 每个 ResultTask
+        TS->>R: executor.submit(task)
+        R-->>TS: Future
+    end
+
+    Note over R,F: 多个 ResultTask 在线程池中并行读取
+    R->>F: 各自读取当前 Reduce 分区的 Map 输出
+
+    loop 每个 Future
+        TS->>TS: await(future)
+        R-->>TS: 返回对应分区结果
+    end
+
+    TS-->>D: 返回所有分区结果
+```
+
+关键不只是代码先调用了父 Stage，而是 `submitShuffleMapStage(...)` 返回时，父 Stage 的所有任务已经执行完毕。`for` 循环结束以后，Map 输出文件已经准备好，代码才会继续提交 ResultStage：
 
 ```java
 return submitMissingTasks(stage, taskScheduler, partitionFunction);
 ```
 
-`submitMissingTasks()` 的意思很直接：一个 Stage 已经确定了，现在要把这个 Stage 里还没完成的分区任务提交出去。这里会出现两类任务：
+`DAGScheduler` 负责守住这个先后顺序。真正把每个分区任务交给线程池的，仍然是 `TaskScheduler`。
 
-```text
-ShuffleMapStage -> ShuffleMapTask
-ResultStage     -> CollectTask
-```
-
-`ShuffleMapTask` 写 Map 输出，`CollectTask` 读取最终 RDD 的一个结果分区。这样 Map 输出不再由 `ShuffledRDD.compute()` 临时补写，ResultStage 也仍然保持“每个结果分区一个任务”的结构。
-
-对于 `ResultStage`，提交任务就是调用 `TaskScheduler.collectPartitions()`：
+`submitMissingTasks()` 是 Stage 真正变成 Task 的地方。先看 `ResultStage`：
 
 ```java
 private <T, U> List<U> submitMissingTasks(
         Stage stage,
         TaskScheduler taskScheduler,
-        Function<List<T>, U> partitionFunction) {
-    List<List<T>> partitions =
-            taskScheduler.collectPartitions((RDD<T>) stage.rdd());
-
-    List<U> result = new java.util.ArrayList<>();
-    for (List<T> partition : partitions) {
-        result.add(partitionFunction.apply(partition));
+        Function<Iterator<T>, U> partitionFunction) {
+    RDD<T> rdd = (RDD<T>) stage.rdd();
+    List<ResultTask<T, U>> tasks = new ArrayList<>();
+    for (Partition partition : rdd.partitions()) {
+        tasks.add(new ResultTask<>(
+                rdd, partition, partitionFunction, verbose));
     }
-    return result;
+    return taskScheduler.submitTasks(tasks);
 }
 ```
 
-这里的 `stage.rdd()` 就是最终的 `ShuffledRDD`。`TaskScheduler.collectPartitions()` 会为它的每个 Reduce 分区创建 `CollectTask`，交给线程池执行；每个分区返回一个 `List<T>`。随后 `partitionFunction` 再把每个分区结果变成 action 需要的返回值。
+这里的 `stage.rdd()` 就是最终的 `ShuffledRDD`。循环每看到一个 Reduce 分区，就创建一个 `ResultTask`。因此，两个 Reduce 分区会得到两个 `ResultTask`。
 
-对应的 `collectPartitions()` 是：
+`ResultTask` 计算一个最终 RDD 分区，再执行当前 action 传入的 `partitionFunction`：
 
 ```java
-public <T> List<List<T>> collectPartitions(RDD<T> rdd) {
-    Objects.requireNonNull(rdd, "rdd");
-
-    List<Future<List<T>>> futures = new ArrayList<>();
-    for (Partition partition : rdd.partitions()) {
-        futures.add(executor.submit(
-                new CollectTask<>(rdd, partition, verbose)));
-    }
-
-    List<List<T>> result = new ArrayList<>();
-    for (Future<List<T>> future : futures) {
-        result.add(await(future));
-    }
-    return result;
+public U call() {
+    return partitionFunction.apply(rdd.iterator(partition));
 }
 ```
 
-对 `collect()` 来说，`partitionFunction` 只是 `List::copyOf`，最后 `RDD.collect()` 再把这些分区 List 合并成一个总 List。这里的 `CollectTask` 先承担 ResultStage 的分区计算。
+这行代码很关键：`ResultTask` 不关心当前 action 是 `collect()`、`count()` 还是 `reduce()`。它只负责把当前分区的迭代器交给分区函数。
 
-对于 `ShuffleMapStage`，提交任务就是准备 shuffle 文件：
+对 `collect()` 来说，分区函数会把元素收进 List，所以每个 `ResultTask` 返回当前分区的元素列表；最后 `RDD.collect()` 再把这些列表合并起来。`count()` 和 `reduce()` 也使用同一个 `ResultTask`，但它们会直接遍历迭代器并返回计数或局部合并结果。
+
+再看 `ShuffleMapStage`。`submitShuffleMapStage()` 先递归完成更早的父 Stage，然后调用另一个 `submitMissingTasks()`：
 
 ```java
 private void submitShuffleMapStage(
@@ -599,32 +663,62 @@ private void submitShuffleMapStage(
 
 中间的 `for` 循环处理更早的父 Stage。当前例子里只有两段，所以父 Stage 没有再往上的 Stage。
 
-最后的 `submitMissingTasks(stage, taskScheduler)` 会把 `ShuffleMapStage` 交给 `TaskScheduler`：
+最后的 `submitMissingTasks(stage, taskScheduler)` 取得这条 Stage 保存的 `ShuffleDependency`：
 
 ```java
 private void submitMissingTasks(Stage stage, TaskScheduler taskScheduler) {
-    ShuffleDependency dependency = stage.shuffleDependency()
+    ShuffleDependency<?, ?> dependency = stage.shuffleDependency()
             .orElseThrow(() -> new IllegalStateException("missing shuffle dependency"));
-    taskScheduler.runShuffleMapTasks((RDD) stage.rdd(), dependency);
+    submitShuffleMapTasks(stage, taskScheduler, dependency);
 }
 ```
 
-`TaskScheduler.runShuffleMapTasks(...)` 再为父 RDD 的每个 Map 分区创建一个 `ShuffleMapTask`：
+接着，`DAGScheduler` 为父 RDD 的每个 Map 分区创建一个 `ShuffleMapTask`：
 
 ```java
-public <K, V> void runShuffleMapTasks(
-        RDD<KeyValuePair<K, V>> rdd,
+private <K, V> void submitShuffleMapTasks(
+        Stage stage,
+        TaskScheduler taskScheduler,
         ShuffleDependency<K, V> dependency) {
-    List<Future<Void>> futures = new ArrayList<>();
+    RDD<KeyValuePair<K, V>> rdd =
+            (RDD<KeyValuePair<K, V>>) stage.rdd();
+    List<ShuffleMapTask<K, V>> tasks = new ArrayList<>();
     for (Partition partition : rdd.partitions()) {
-        futures.add(executor.submit(
-                new ShuffleMapTask<>(rdd, partition, dependency)));
+        tasks.add(new ShuffleMapTask<>(rdd, partition, dependency));
+    }
+    taskScheduler.submitTasks(tasks);
+}
+```
+
+两类 Task 都创建好以后，进入的是同一个 `TaskScheduler.submitTasks(...)`：
+
+```java
+public <T> List<T> submitTasks(List<? extends Callable<T>> tasks) {
+    List<Future<T>> futures = new ArrayList<>();
+    for (Callable<T> task : tasks) {
+        futures.add(executor.submit(task));
     }
 
-    for (Future<Void> future : futures) {
-        await(future);
+    List<T> result = new ArrayList<>();
+    for (Future<T> future : futures) {
+        result.add(await(future));
     }
+    return result;
 }
+```
+
+`TaskScheduler` 不需要知道这些任务属于哪个 Stage，也不需要判断它们是写 Shuffle 文件还是计算最终结果。它只提交任务、等待 Future，并按提交顺序返回结果。
+
+现在再总结 Stage 和 Task 的关系：
+
+```text
+ShuffleMapStage
+  -> DAGScheduler 为每个 Map 分区创建一个 ShuffleMapTask
+  -> TaskScheduler 提交这些任务
+
+ResultStage
+  -> DAGScheduler 为每个结果分区创建一个 ResultTask
+  -> TaskScheduler 提交这些任务
 ```
 
 `ShuffleMapTask` 做的事很单纯：读取父 RDD 的一个分区，按 key 分桶，然后写出属于各个 Reduce 分区的文件。
@@ -714,15 +808,10 @@ private Map<K, V> readAndMergeReducePartition(int reduceId) {
 
 | 调度器 | 关心的问题 |
 |---|---|
-| `DAGScheduler` | 这个作业要切成几个 Stage，父 Stage 是否已经准备好 |
-| `TaskScheduler` | 给定一个 RDD，把它的各个分区提交给线程池 |
+| `DAGScheduler` | 作业要切成几个 Stage，每个 Stage 应该创建哪些 Task |
+| `TaskScheduler` | 把收到的 Task 提交给线程池，并等待执行结果 |
 
 这不是推翻 `TaskScheduler`，而是在它上面加一层更大的调度：先按 Shuffle 边界安排大步骤，再把具体的分区计算交给底层调度器。
-
-> [!INFO]
-> **为什么第 7 章还保留 ShuffledRDD？**
->
-> 因为 `ShuffledRDD` 是 RDD DAG 里的节点，不是调度器里的 Stage。`Stage` 负责“先后顺序”，`ShuffleMapTask` 负责“写文件”，`ShuffledRDD` 负责“作为下游 RDD 读取文件”。这三个角色分开后，结构才清楚。
 
 ## 7.6 跑一次，看 Stage 树
 

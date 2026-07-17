@@ -1,137 +1,45 @@
 package com.sparklearn;
 
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
-import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.function.BinaryOperator;
 
 /**
  * 单机多线程版 TaskScheduler。
  *
- * <p>每个分区创建一个独立计算，提交到固定大小的线程池；分区计算返回自己的结果，
- * 调用 action 的线程统一合并。
+ * <p>DAGScheduler 创建好一批 Task 后，TaskScheduler 负责把它们提交到固定大小的
+ * 线程池，并按提交顺序收集结果。
  */
 public final class TaskScheduler implements AutoCloseable {
 
     private final ExecutorService executor;
-    private final boolean verbose;
 
     public TaskScheduler(int numberOfThreads) {
-        this(numberOfThreads, false);
-    }
-
-    public TaskScheduler(int numberOfThreads, boolean verbose) {
         if (numberOfThreads <= 0) {
             throw new IllegalArgumentException("numberOfThreads must be positive");
         }
         this.executor = Executors.newFixedThreadPool(numberOfThreads);
-        this.verbose = verbose;
     }
 
     /**
-     * 并行 collect：每个分区一个 CollectTask，最后按分区顺序合并结果。
+     * 把一批任务提交到线程池，并按任务的提交顺序返回结果。
      */
-    public <T> List<T> collect(RDD<T> rdd) {
-        List<List<T>> partitionResults = collectPartitions(rdd);
+    public <T> List<T> submitTasks(List<? extends Callable<T>> tasks) {
+        Objects.requireNonNull(tasks, "tasks");
+
+        List<Future<T>> futures = new ArrayList<>();
+        for (Callable<T> task : tasks) {
+            futures.add(executor.submit(task));
+        }
+
         List<T> result = new ArrayList<>();
-        for (List<T> partitionResult : partitionResults) {
-            result.addAll(partitionResult);
-        }
-        return result;
-    }
-
-    /**
-     * 并行运行所有分区，每个分区返回一个独立结果列表。
-     */
-    public <T> List<List<T>> collectPartitions(RDD<T> rdd) {
-        Objects.requireNonNull(rdd, "rdd");
-
-        List<Future<List<T>>> futures = new ArrayList<>();
-        for (Partition partition : rdd.partitions()) {
-            futures.add(executor.submit(new CollectTask<>(rdd, partition, verbose)));
-        }
-
-        List<List<T>> result = new ArrayList<>();
-        for (Future<List<T>> future : futures) {
+        for (Future<T> future : futures) {
             result.add(await(future));
-        }
-        return result;
-    }
-
-    /**
-     * 并行运行 ShuffleMapStage：每个 Map 分区写出自己的 shuffle 中间文件。
-     */
-    public <K, V> void runShuffleMapTasks(
-            RDD<KeyValuePair<K, V>> rdd,
-            ShuffleDependency<K, V> dependency) {
-        Objects.requireNonNull(rdd, "rdd");
-        Objects.requireNonNull(dependency, "dependency");
-
-        List<Future<Void>> futures = new ArrayList<>();
-        for (Partition partition : rdd.partitions()) {
-            futures.add(executor.submit(new ShuffleMapTask<>(rdd, partition, dependency)));
-        }
-
-        for (Future<Void> future : futures) {
-            await(future);
-        }
-    }
-
-    /**
-     * 并行 count：每个分区独立计数，最后由调用 action 的线程累加。
-     */
-    public <T> long count(RDD<T> rdd) {
-        Objects.requireNonNull(rdd, "rdd");
-
-        List<Future<Long>> futures = new ArrayList<>();
-        for (Partition partition : rdd.partitions()) {
-            futures.add(executor.submit(() -> countPartition(rdd, partition)));
-        }
-
-        long total = 0;
-        for (Future<Long> future : futures) {
-            total += await(future);
-        }
-        return total;
-    }
-
-    /**
-     * 并行 reduce：每个分区先归并，再把各分区结果归并成最终结果。
-     *
-     * <p>operator 必须满足结合律，例如整数加法；否则分区内先归并会改变结果。
-     */
-    public <T> T reduce(RDD<T> rdd, BinaryOperator<T> operator) {
-        Objects.requireNonNull(rdd, "rdd");
-        Objects.requireNonNull(operator, "operator");
-
-        List<Future<PartitionResult<T>>> futures = new ArrayList<>();
-        for (Partition partition : rdd.partitions()) {
-            futures.add(executor.submit(() -> reducePartition(rdd, partition, operator)));
-        }
-
-        T result = null;
-        boolean hasResult = false;
-        for (Future<PartitionResult<T>> future : futures) {
-            PartitionResult<T> partitionResult = await(future);
-            if (!partitionResult.hasValue()) {
-                continue;
-            }
-            if (!hasResult) {
-                result = partitionResult.value();
-                hasResult = true;
-            } else {
-                result = operator.apply(result, partitionResult.value());
-            }
-        }
-
-        if (!hasResult) {
-            throw new NoSuchElementException("reduce on empty RDD");
         }
         return result;
     }
@@ -139,32 +47,6 @@ public final class TaskScheduler implements AutoCloseable {
     @Override
     public void close() {
         executor.shutdown();
-    }
-
-    private static <T> long countPartition(RDD<T> rdd, Partition partition) {
-        long count = 0;
-        Iterator<T> iterator = rdd.iterator(partition);
-        while (iterator.hasNext()) {
-            iterator.next();
-            count++;
-        }
-        return count;
-    }
-
-    private static <T> PartitionResult<T> reducePartition(
-            RDD<T> rdd,
-            Partition partition,
-            BinaryOperator<T> operator) {
-        Iterator<T> iterator = rdd.iterator(partition);
-        if (!iterator.hasNext()) {
-            return PartitionResult.empty();
-        }
-
-        T result = iterator.next();
-        while (iterator.hasNext()) {
-            result = operator.apply(result, iterator.next());
-        }
-        return PartitionResult.of(result);
     }
 
     private static <T> T await(Future<T> future) {
@@ -175,16 +57,6 @@ public final class TaskScheduler implements AutoCloseable {
             throw new IllegalStateException("task interrupted", e);
         } catch (ExecutionException e) {
             throw new IllegalStateException("task failed", e.getCause());
-        }
-    }
-
-    private record PartitionResult<T>(boolean hasValue, T value) {
-        static <T> PartitionResult<T> empty() {
-            return new PartitionResult<>(false, null);
-        }
-
-        static <T> PartitionResult<T> of(T value) {
-            return new PartitionResult<>(true, value);
         }
     }
 }

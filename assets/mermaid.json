@@ -1,0 +1,42 @@
+{
+  "startOnLoad": true,
+  "theme": "base",
+  "themeVariables": {
+    "background": "#2e3440",
+    "fontFamily": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+    "primaryColor": "#3b4252",
+    "primaryTextColor": "#eceff4",
+    "primaryBorderColor": "#88c0d0",
+    "lineColor": "#d8dee9",
+    "secondaryColor": "#434c5e",
+    "tertiaryColor": "#4c566a",
+    "textColor": "#eceff4",
+    "actorBkg": "#3b4252",
+    "actorBorder": "#88c0d0",
+    "actorTextColor": "#eceff4",
+    "actorLineColor": "#a3b1c6",
+    "signalColor": "#d8dee9",
+    "signalTextColor": "#eceff4",
+    "labelBoxBkgColor": "#3b4252",
+    "labelBoxBorderColor": "#81a1c1",
+    "labelTextColor": "#eceff4",
+    "loopTextColor": "#eceff4",
+    "noteBkgColor": "#434c5e",
+    "noteBorderColor": "#ebcb8b",
+    "noteTextColor": "#eceff4",
+    "activationBkgColor": "#5e81ac",
+    "activationBorderColor": "#88c0d0",
+    "sequenceNumberColor": "#2e3440"
+  },
+  "flowchart": {
+    "useMaxWidth": true
+  },
+  "sequence": {
+    "useMaxWidth": true,
+    "diagramMarginX": 24,
+    "diagramMarginY": 16,
+    "actorMargin": 42,
+    "messageMargin": 28,
+    "noteMargin": 12
+  }
+}
