@@ -1,46 +1,27 @@
 package com.sparklearn;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.File;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
 final class ShuffledRDDTest {
 
     @Test
-    void reduceByKeyIsLazyAndAggregatesCorrectly() {
+    void computeRequiresExistingShuffleMapOutputs() {
         try (SparkContext sc = new SparkContext(2)) {
             ShuffledRDD<String, Integer> shuffled = newShuffledRdd(sc);
+            File shuffleDir = shuffled.shuffleDir();
 
-            assertEquals(0, countFiles(shuffled.shuffleDir()));
-
-            Map<String, Integer> result = toMap(shuffled.collect());
-            assertEquals(Map.of(
-                    "hello", 4,
-                    "world", 2,
-                    "spark", 2,
-                    "java", 1), result);
-
-            assertEquals(6, countFiles(shuffled.shuffleDir()));
-            cleanup(shuffled.shuffleDir());
-        }
-    }
-
-    @Test
-    void missingShuffleFilesFailOnSecondCollect() {
-        try (SparkContext sc = new SparkContext(2)) {
-            ShuffledRDD<String, Integer> shuffled = newShuffledRdd(sc);
-
-            shuffled.collect();
-
-            cleanup(shuffled.shuffleDir());
-
-            assertThrows(RuntimeException.class, shuffled::collect);
+            try {
+                assertThrows(
+                        RuntimeException.class,
+                        () -> shuffled.iterator(new Partition(0)).hasNext());
+            } finally {
+                shuffleDir.delete();
+            }
         }
     }
 
@@ -59,24 +40,4 @@ final class ShuffledRDDTest {
         return rdd.reduceByKey(Integer::sum, 2);
     }
 
-    private static Map<String, Integer> toMap(List<KeyValuePair<String, Integer>> values) {
-        return values.stream().collect(Collectors.toMap(
-                KeyValuePair::key,
-                KeyValuePair::value));
-    }
-
-    private static int countFiles(File dir) {
-        File[] files = dir.listFiles();
-        return files == null ? 0 : files.length;
-    }
-
-    private static void cleanup(File dir) {
-        File[] files = dir.listFiles();
-        if (files != null) {
-            for (File file : files) {
-                file.delete();
-            }
-        }
-        dir.delete();
-    }
 }

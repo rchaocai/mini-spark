@@ -49,10 +49,11 @@ java  -> 1
 
 > 把原来按输入分区摆放的数据，重新按 key 摆放，让相同 key 的值最终来到同一个 Reduce 分区。
 
-代码上，本章不是重写上一章的调度器，而是在上一章快照上只新增两样东西：
+代码上会保留上一章的分区调度结构，把注意力集中在三个新增角色上：
 
 | 新增类 | 职责 |
 |---|---|
+| `SparkContext` | 保存调度器，并作为 RDD action 的统一入口 |
 | `KeyValuePair<K, V>` | 表示 `(key, value)` |
 | `ShuffledRDD<K, V>` | 实现硬编码版 `reduceByKey` |
 
@@ -264,13 +265,13 @@ public Iterator<KeyValuePair<K, V>> compute(Partition partition) {
 > [!INFO]
 > **这里为什么由 `ShuffledRDD` 同时写和读？**
 >
-> 用户写的是 `rdd.reduceByKey(...)`，底层返回的是 `ShuffledRDD`。这是当前 API 的一个小妥协：方法暂时挂在所有 `RDD` 上，Java 类型系统还不能阻止你在非键值对 RDD 上误用它。专门的键值对 RDD 可以解决这个类型边界；这里先保持调用方向简单。
+> 用户写的是 `rdd.reduceByKey(...)`，底层返回的是 `ShuffledRDD`。当前方法直接挂在 `RDD` 上，因此只有元素确实是 `KeyValuePair` 时才能正确使用；这是一处简化后的类型边界。
 >
-> 另外，本章还没有调度器来拆分“先跑 Map 任务、再跑 Reduce 任务”，所以“通知上游 Map 分区先落盘”这件事，暂时放在 `ShuffledRDD.compute()` 里面做。
+> 当前 `TaskScheduler` 只会并行计算给定 RDD 的各个分区，不会把一次 Shuffle 拆成“先提交 Map 任务、再提交 Reduce 任务”两批。因此，`ShuffledRDD.compute()` 必须先保证 Map 输出已经写好，再读取当前 Reduce 分区。
 >
 > 当前代码的执行顺序是：`collect(shuffled)` 先提交 2 个 Reduce 分区任务；第一个进入 `compute()` 的线程拿到锁，顺序遍历父 RDD 的 3 个分区，写出 `3 × 2` 个文件；随后 2 个 Reduce 分区任务分别读自己的文件。
 >
-> 当执行层继续展开以后，这个物理过程会被拆开：Map 任务先在持有输入分区的位置写出 shuffle 文件，Reduce 任务再读取这些文件并合并。逻辑 API 上仍然是 `rdd.reduceByKey(...)` 返回一个下游 `ShuffledRDD`，不是两个逻辑 RDD；只是执行层会分成两批任务。
+> 这里要分清逻辑结构和执行顺序：`reduceByKey(...)` 只返回一个下游 `ShuffledRDD`；但完成这个 RDD 的计算，物理上仍然包含“写 Map 输出”和“读 Reduce 输入”两个阶段。
 
 ### 先保证 Map 阶段只跑一次
 
@@ -579,7 +580,7 @@ sequenceDiagram
     S-->>T1: 返回 reduce 1 结果
 ```
 
-也就是说，`TaskScheduler` 只知道“有 2 个 Reduce 分区要并行算”。至于第一次进入 `ShuffledRDD.compute()` 时为什么会先写 `3 × 2` 个文件，是 `ShuffledRDD` 在当前结构里的职责。
+也就是说，`TaskScheduler` 只知道“有 2 个 Reduce 分区要并行算”。至于第一次进入 `ShuffledRDD.compute()` 时为什么会先写 `3 × 2` 个文件，是 `ShuffledRDD` 在这个实现里的职责。
 
 结果里 key 的顺序不重要，因为当前实现最后从 `HashMap` 取出结果：
 
@@ -653,7 +654,7 @@ try {
 
 在本章 mini 实现里，`ShuffledRDD` 的 Map 阶段已经完成过一次，后面的 Reduce 分区不再重新走父 RDD 的迭代器，而是读磁盘上的 Map 输出文件。文件删掉以后，下游就没有输入了。
 
-任何 shuffle 系统都必须先有 Map 输出，Reduce 端才能读取。成熟的分布式执行器可以重新调度丢失的 Map 任务，把缺失的 shuffle 输出再写出来。本章还没有容错和重试，所以会直接失败。
+任何 shuffle 系统都必须先有 Map 输出，Reduce 端才能读取。成熟的分布式执行器可以重新调度丢失的 Map 任务，把缺失的 shuffle 输出再写出来。这个实现还没有容错和重试，所以会直接失败。
 
 换句话说，中间文件不是日志，不是调试产物，也不是“顺手写一下”。它就是 Map 端和 Reduce 端之间传递数据的物理介质。
 
@@ -712,7 +713,7 @@ static int partition(Object key, int numPartitions) {
 如果把 `Partitioner` 记录在 RDD 上，下游算子就能判断：这份数据是否已经按照自己需要的规则分好了。`Partitioner` 的价值不只是给一行取模代码起名字，更重要的是保存数据当前的分布方式。
 
 > [!INFO]
-> **Spark 为什么要让 RDD 记住 Partitioner？**
+> **为什么要让 RDD 记住 Partitioner？**
 >
 > 键值对 RDD 可以带有一个可选的 `partitioner`。`reduceByKey`、`partitionBy` 这类操作完成 Shuffle 后，会把所用的分区器记录在结果 RDD 上。
 >
@@ -745,11 +746,11 @@ static int partition(Object key, int numPartitions) {
 >
 > 多个 RDD 已经按照同一个 `Partitioner` 排列的状态，叫作 **co-partitioning**。它的作用不是让所有 Shuffle 消失，而是让系统识别出哪些父 RDD 已经满足分布要求，只重新分布不满足要求的那一部分。
 
-现在可以更准确地理解 `Partitioner`：它既负责计算 key 的目标分区，也让后续算子知道这次分区结果能不能继续使用。
+这样再看 `Partitioner`，它就不只是一个哈希函数。它既负责计算 key 的目标分区，也让后续算子知道这次分区结果能不能继续使用。
 
 ## 6.8 本章小结
 
-本章在上一章的 TaskScheduler 基础上，只增加了一个最小版 `reduceByKey`。
+本章在上一章的分区调度基础上，增加了 action 入口和一个最小版 `reduceByKey`。
 
 它做的事情可以压缩成三步：
 
@@ -757,6 +758,6 @@ static int partition(Object key, int numPartitions) {
 2. 每个 Map 分区把每个 Reduce 桶写成一个本地文件。
 3. Reduce 分区读取属于自己的那批文件，再次合并相同 key。
 
-这套实现很小，但它已经抓住了 Shuffle 最核心的事实：跨分区的同 key 数据不会自己聚到一起，必须被重新分布；重新分布需要中间产物。在本章 mini 实现里，中间文件一旦丢失，下游计算就无法继续；后面的容错章节会再补上“如何重算回来”。
+这套实现很小，但它已经抓住了 Shuffle 最核心的事实：跨分区的同 key 数据不会自己聚到一起，必须被重新分布；重新分布需要中间产物。在这个 mini 实现里，中间文件一旦丢失，下游计算就无法继续；后面的容错章节会再补上“如何重算回来”。
 
 下一章，我们会把这道物理边界交给调度器。到那时，再来回答一个更大的问题：一条 RDD 血缘里，哪些计算可以放在一起跑，哪些地方必须切开？

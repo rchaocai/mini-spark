@@ -39,8 +39,6 @@ public abstract class RDD<T> {
 
     /**
      * 读取一个分区的数据。
-     *
-     * <p>现在直接调用 compute(partition)，后续会在这里插入缓存判断。
      */
     public final Iterator<T> iterator(Partition partition) {
         Objects.requireNonNull(partition, "partition");

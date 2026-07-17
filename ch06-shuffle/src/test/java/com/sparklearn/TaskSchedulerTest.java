@@ -46,7 +46,9 @@ final class TaskSchedulerTest {
                         }
                         return number * 10;
                     });
-            assertEquals(List.of(10, 20, 30), scheduler.collect(rdd));
+            assertEquals(
+                    List.of(List.of(10), List.of(20), List.of(30)),
+                    scheduler.collectPartitions(rdd));
         }
         assertEquals(1, computationOrder.get(2));
         assertNotEquals(1, computationOrder.get(0));
@@ -67,27 +69,27 @@ final class TaskSchedulerTest {
                         awaitAllPartitions(allPartitionsStarted);
                         return number;
                     });
-            assertEquals(List.of(1, 2, 3, 4), scheduler.collect(rdd));
+            assertEquals(
+                    List.of(List.of(1), List.of(2), List.of(3), List.of(4)),
+                    scheduler.collectPartitions(rdd));
         }
         assertEquals(4, workerThreads.size());
     }
 
     @Test
-    void countAndReduceMergePartitionResults() {
-        try (SparkContext sc = new SparkContext(3);
-             TaskScheduler scheduler = new TaskScheduler(3)) {
+    void rddActionsMergePartitionResults() {
+        try (SparkContext sc = new SparkContext(3)) {
             RDD<Integer> rdd = sc.parallelize(Arrays.asList(1, 2, 3, 4, 5), 3);
-            assertEquals(5, scheduler.count(rdd));
-            assertEquals(15, scheduler.reduce(rdd, Integer::sum));
+            assertEquals(5, rdd.count());
+            assertEquals(15, rdd.reduce(Integer::sum));
         }
     }
 
     @Test
     void reduceOnEmptyRddFailsClearly() {
-        try (SparkContext sc = new SparkContext(3);
-             TaskScheduler scheduler = new TaskScheduler(3)) {
+        try (SparkContext sc = new SparkContext(3)) {
             RDD<Integer> rdd = sc.parallelize(List.of(), 3);
-            assertThrows(NoSuchElementException.class, () -> scheduler.reduce(rdd, Integer::sum));
+            assertThrows(NoSuchElementException.class, () -> rdd.reduce(Integer::sum));
         }
     }
 

@@ -3,9 +3,9 @@ package com.sparklearn;
 import java.util.Objects;
 
 /**
- * Shuffle 依赖占位：子分区会读取多个父分区写出的 shuffle 结果。
+ * Shuffle 依赖：下游分区需要读取多个父分区写出的中间结果。
  *
- * <p>完整的 shuffle 读写逻辑会在后续展开。
+ * <p>这里记录父 RDD；具体的文件读写由 ShuffledRDD 完成。
  *
  * @param <T> 父 RDD 的元素类型
  */

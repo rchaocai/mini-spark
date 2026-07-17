@@ -33,7 +33,7 @@ public final class DAGScheduler {
     /**
      * 为最终 RDD 创建 ResultStage，并递归找出它依赖的 ShuffleMapStage。
      */
-    public Stage createResultStage(RDD<?> finalRdd) {
+    Stage createResultStage(RDD<?> finalRdd) {
         Objects.requireNonNull(finalRdd, "finalRdd");
         return newResultStage(finalRdd);
     }
@@ -54,11 +54,8 @@ public final class DAGScheduler {
         return runJob(finalStage, taskScheduler, partitionFunction);
     }
 
-    /**
-     * 执行已经创建好的 ResultStage。示例程序可以先打印 Stage 树，再执行同一棵树。
-     */
     @SuppressWarnings("unchecked")
-    public <T, U> List<U> runJob(
+    private <T, U> List<U> runJob(
             Stage finalStage,
             TaskScheduler taskScheduler,
             Function<Iterator<T>, U> partitionFunction) {
