@@ -12,13 +12,9 @@ summary: "从 Shuffle 落盘这个物理边界出发，把宽依赖正式变成 
 >
 > 构建运行：`mvn -pl ch07-stage-dag package && java -Dfile.encoding=UTF-8 -cp ch07-stage-dag/target/classes com.sparklearn.Main`
 
-`reduceByKey` 不是只在内存里绕一圈。Map 端会写出一批中间文件，Reduce 端再读取这些文件。
+上一章已经把 Shuffle 的物理边界摆在了台面上：Map 端会写出中间文件，Reduce 端再读取这些文件。
 
-当我们删掉这些文件以后，后面的 `collect()` 会失败。
-
-这不是一个演示技巧。它说明 Shuffle 中间文件不是“顺手写出来的日志”，而是 Map 端和 Reduce 端之间真正的数据连接。
-
-现在把这个现象再往前推一步：
+文件已经看见了。现在问题变成另一个：
 
 ```text
 Reduce 端要读文件
@@ -26,9 +22,9 @@ Reduce 端要读文件
 所以写文件那一批计算，必须先完成
 ```
 
-前面为了先看清 Shuffle 文件，我们把写文件这件事放在了 `ShuffledRDD.compute()` 里面：Reduce 分区第一次被计算时，先推动上游 Map 分区写文件，然后自己再读文件。
+上一章为了先看清 Shuffle 文件，把写文件这件事放在了 `ShuffledRDD.compute()` 里面：Reduce 分区第一次被计算时，先推动上游 Map 分区写文件，然后自己再读文件。
 
-这能帮助我们确认“中间文件真的存在”，但它不是一个合适的调度位置。因为此时 Reduce 分区任务已经开始执行了，才临时发现自己要读的文件还没有准备好。
+这个安排可以跑通，但调度位置不对。因为此时 Reduce 分区任务已经开始执行了，才临时发现自己要读的文件还没有准备好。
 
 现在要把这件事上移一层：
 

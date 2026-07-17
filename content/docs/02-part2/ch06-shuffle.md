@@ -3,7 +3,7 @@ title: "第 6 章 · 亲手写一个 Shuffle"
 weight: 2
 date: 2026-07-16
 tags: ["Shuffle", "reduceByKey", "ShuffledRDD", "本地文件", "Partitioner"]
-summary: "在第 5 章 TaskScheduler 的基础上，亲手实现一个硬编码 reduceByKey：Map 端按 key 哈希写本地文件，Reduce 端读文件合并，从而看清 Shuffle 为什么是一道真实的物理边界。"
+summary: "在上一章 TaskScheduler 的基础上，亲手实现一个硬编码 reduceByKey：Map 端按 key 哈希写本地文件，Reduce 端读文件合并，从而看清 Shuffle 为什么是一道真实的物理边界。"
 ---
 
 # 第 6 章 · 亲手写一个 Shuffle
@@ -12,7 +12,7 @@ summary: "在第 5 章 TaskScheduler 的基础上，亲手实现一个硬编码 
 >
 > 构建运行：`mvn -pl ch06-shuffle package && java -Dfile.encoding=UTF-8 -cp ch06-shuffle/target/classes com.sparklearn.Main`
 
-第 5 章完成了一个重要跃迁：RDD 的每个分区都可以变成一个 Task，交给 `TaskScheduler` 并行执行。
+上一章完成了一个重要跃迁：RDD 的每个分区都可以变成一个 Task，交给 `TaskScheduler` 并行执行。
 
 不过，到目前为止，所有流水线都有一个共同特点：
 
@@ -43,20 +43,18 @@ spark -> 2
 java  -> 1
 ```
 
-问题来了：`hello` 分散在 3 个分区里。第 5 章的 Task 只会计算自己负责的分区，分区 0 的 Task 看不到分区 1 和分区 2。只靠原来的“同号父分区一路算下去”，已经不够了。
+问题来了：`hello` 分散在 3 个分区里。上一章的 Task 只会计算自己负责的分区，分区 0 的 Task 看不到分区 1 和分区 2。只靠原来的“同号父分区一路算下去”，已经不够了。
 
 这就是 Shuffle 要解决的问题：
 
 > 把原来按输入分区摆放的数据，重新按 key 摆放，让相同 key 的值最终来到同一个 Reduce 分区。
 
-代码上，本章不是重写第 5 章的调度器，而是在第 5 章快照上只新增两样东西：
+代码上，本章不是重写上一章的调度器，而是在上一章快照上只新增两样东西：
 
 | 新增类 | 职责 |
 |---|---|
 | `KeyValuePair<K, V>` | 表示 `(key, value)` |
 | `ShuffledRDD<K, V>` | 实现硬编码版 `reduceByKey` |
-
-程序入口保持在 RDD 这一层：先用 `SparkContext` 创建 RDD，在键值对 RDD 上调用 `rdd.reduceByKey(...)`，最后用 `shuffled.collect()` 触发 action。`collect()` 会把作业交给上下文运行；再往下，分区任务才会被提交到线程池。
 
 ## 6.1 单个分区算不出全局答案
 
@@ -83,7 +81,7 @@ world -> 1
 
 单机 Java 当然做得到。加个锁，或者用 `ConcurrentHashMap`，技术上都能跑。
 
-但这条路和第 5 章刚建立的 Task 边界冲突：第 5 章里，每个 Task 只计算自己的分区，通过返回值交出结果，不写共享容器。这个约束让 Task 天然容易并行，也为后面跨机器执行留下空间。
+但这条路和上一章刚建立的 Task 边界冲突：每个 Task 只计算自己的分区，通过返回值交出结果，不写共享容器。这个约束让 Task 天然容易并行，也为后面跨机器执行留下空间。
 
 更重要的是，一旦 Task 不在同一个 JVM 里，共享内存这条路就不存在了。线程之间还能共享对象，机器之间不能共享内存地址。
 
@@ -95,9 +93,96 @@ Task 之间不直接通信。
 
 要跨分区交换数据，就必须把上游产物放到一个下游能够重新读取的位置。我们先用最朴素、最容易观察的办法：写本地文件。
 
+先把整体入口摆出来：
+
+> [!INFO]
+> **`SparkContext` 是什么？**
+>
+> 它不是为了把代码“包装得好看”才加的类，而是为了解决 action 入口的问题。
+>
+> 上一章的调用方式是从外面把 RDD 交给 `TaskScheduler`。到了这里，action 写在 RDD 自己身上：用户调用的是 `shuffled.collect()`。那么 `collect()` 里面必须能找到一个调度器，否则它就不知道该把分区任务交给谁。
+>
+> `SparkContext` 就是这个连接点：源头 RDD 从它这里创建，并记住这个上下文；等 `collect()` 触发时，RDD 再通过同一个上下文进入 `runJob(...)`，最后由上下文里持有的 `TaskScheduler` 提交分区任务。
+
+```java
+try (SparkContext sc = new SparkContext(2, true)) {
+    RDD<KeyValuePair<String, Integer>> rdd = sc.parallelize(words, 3);
+    ShuffledRDD<String, Integer> shuffled = rdd.reduceByKey(
+            Integer::sum, 2);
+
+    System.out.println("reduceByKey 结果: " + shuffled.collect());
+}
+```
+
+前三行只是在搭 RDD 血缘。真正开始执行的是最后的 `shuffled.collect()`。
+
+先看 `RDD.collect()`：
+
+```java
+public List<T> collect() {
+    List<List<T>> partitionResults = sparkContext.runJob(this, List::copyOf);
+    List<T> result = new ArrayList<>();
+    for (List<T> partitionResult : partitionResults) {
+        result.addAll(partitionResult);
+    }
+    return result;
+}
+```
+
+它没有自己遍历分区，而是把当前 RDD 交给 `SparkContext.runJob(...)`：
+
+```java
+public <T, U> List<U> runJob(
+        RDD<T> rdd,
+        Function<List<T>, U> partitionFunction) {
+    List<List<T>> partitions = taskScheduler.collectPartitions(rdd);
+    List<U> result = new ArrayList<>();
+    for (List<T> partition : partitions) {
+        result.add(partitionFunction.apply(partition));
+    }
+    return result;
+}
+```
+
+这几段代码连起来，执行顺序是：
+
+```mermaid
+sequenceDiagram
+    participant User as 用户代码
+    participant RDD as ShuffledRDD.collect()
+    participant SC as SparkContext.runJob()
+    participant TS as TaskScheduler
+    participant W as 工作线程
+
+    User->>RDD: collect()
+    RDD->>SC: runJob(this, List::copyOf)
+    SC->>TS: collectPartitions(shuffled)
+    TS->>W: 提交 Reduce 分区 0
+    TS->>W: 提交 Reduce 分区 1
+    W->>RDD: compute(reducePartition)
+    RDD-->>W: 返回当前 Reduce 分区结果
+    W-->>TS: 分区结果 List
+    TS-->>SC: 所有分区结果
+    SC-->>RDD: 每个分区一个 List
+    RDD-->>User: 合并成最终 List
+```
+
+后面的小节就沿着这条线往里拆：先把 `(key, value)` 落成代码，再看 `reduceByKey` 怎么写文件、怎么读文件。
+
 ## 6.2 先把键值对落成代码
 
-`reduceByKey` 处理的是 `(key, value)`。本章先加一个很小的 record：
+`reduceByKey` 的名字里有一个关键字：`Key`。
+
+也就是说，系统不能只看到一个普通元素。它必须能回答两个问题：
+
+```text
+这条记录按谁分组？  -> key
+分组以后合并什么？  -> value
+```
+
+词频统计里，`hello` 是 key，`1` 是 value。Shuffle 会根据 key 决定这条记录去哪个 Reduce 分区；到了 Reduce 分区以后，再把同一个 key 的 value 合并起来。
+
+所以先把一条输入记录写成一个很小的 record：
 
 ```java
 public record KeyValuePair<K, V>(K key, V value) implements Serializable {
@@ -106,19 +191,49 @@ public record KeyValuePair<K, V>(K key, V value) implements Serializable {
 
 完整实现见 [`KeyValuePair.java`](https://github.com/rchaocai/mini-spark/tree/main/ch06-shuffle/src/main/java/com/sparklearn/KeyValuePair.java)。
 
-它只负责保存一对值。比如一条词频输入就是：
+有了它，示例输入和源头 RDD 就可以连在一起看：
 
 ```java
-new KeyValuePair<>("hello", 1)
-```
+List<KeyValuePair<String, Integer>> words = Arrays.asList(
+        new KeyValuePair<>("hello", 1),
+        new KeyValuePair<>("world", 1),
+        new KeyValuePair<>("hello", 1),
+        new KeyValuePair<>("spark", 1),
+        new KeyValuePair<>("world", 1),
+        new KeyValuePair<>("hello", 1),
+        new KeyValuePair<>("java", 1),
+        new KeyValuePair<>("spark", 1),
+        new KeyValuePair<>("hello", 1));
 
-接着，用 `SparkContext.parallelize(...)` 把这些键值对切成 3 个 Map 分区：
-
-```java
 RDD<KeyValuePair<String, Integer>> rdd = sc.parallelize(words, 3);
 ```
 
-注意变量类型写的是 `RDD`，不是 `ListRDD`。用户只需要拿到一个抽象 RDD；至于它底下是不是来自本地 List，是实现细节。这里的实际对象仍然是 `ListRDD`，它按连续区间切分 List。也就是说，本章只是增加了 Shuffle 逻辑，不是换了一套数据源。
+这段代码里有三个层次。
+
+第一，`KeyValuePair<String, Integer>` 表示 key 是 `String`，value 是 `Integer`。也就是按单词分组，合并计数。
+
+第二，`words` 只是普通 Java List，还不是 RDD。它只是把输入数据准备好。
+
+第三，`sc.parallelize(words, 3)` 把这个 List 切成 3 个 Map 分区。这里的切分逻辑沿用上一章的 `ListRDD`：按连续区间切分，先算每个分区的基础大小，再把余数分给前面的分区。当前例子有 9 条数据、3 个分区，所以每个分区正好 3 条。
+
+上一章会直接写：
+
+```java
+RDD<KeyValuePair<String, Integer>> rdd =
+        new ListRDD<>(words, 3);
+```
+
+现在多了一个 `SparkContext`，所以源头 RDD 也从上下文创建：
+
+```java
+public <T> RDD<T> parallelize(List<T> data, int numberOfPartitions) {
+    return new ListRDD<>(this, data, numberOfPartitions);
+}
+```
+
+也就是说，`parallelize` 没有发明新的数据结构。它只是把“从本地 List 创建 RDD”这件事放到 `SparkContext` 入口下。这样后面的 `collect()` 才能沿着同一个上下文进入 `runJob(...)`，再交给调度器运行。
+
+变量类型写成 `RDD<KeyValuePair<String, Integer>>`，是因为后面的代码只需要依赖 RDD 抽象；当前数据源底下实际仍然是 `ListRDD`。
 
 ## 6.3 Map 端：按 key 哈希写文件
 
@@ -172,7 +287,7 @@ private void ensureMapPhase() {
 }
 ```
 
-为什么这里要加一个小小的 `synchronized`？因为第 5 章的 `TaskScheduler` 会并行计算多个 Reduce 分区。两个工作线程可能同时进入 `compute()`，Map 阶段只应该写一次文件，所以这里用一个很小的临界区守住“只跑一次”。
+为什么这里要加一个小小的 `synchronized`？因为上一章的 `TaskScheduler` 会并行计算多个 Reduce 分区。两个工作线程可能同时进入 `compute()`，Map 阶段只应该写一次文件，所以这里用一个很小的临界区守住“只跑一次”。
 
 ### 再写出 Map 端文件
 
@@ -354,7 +469,28 @@ java -Dfile.encoding=UTF-8 -cp ch06-shuffle/target/classes com.sparklearn.Main
 shuffled.collect()
 ```
 
-`shuffled.collect()` 会先进入 `SparkContext.runJob(...)`，再由底层 `TaskScheduler` 为 `ShuffledRDD` 的 2 个 Reduce 分区提交 2 个 Task。第一次进入 `ShuffledRDD.compute()` 时，当前线程会先顺序推动 3 个父分区写出中间文件。随后两个 Reduce 分区任务再读这些文件，合并出最终结果。
+这时可以把前面的调用链继续展开到 `ShuffledRDD.compute()` 内部：
+
+```mermaid
+sequenceDiagram
+    participant T0 as Reduce 分区 0 任务
+    participant T1 as Reduce 分区 1 任务
+    participant S as ShuffledRDD
+    participant M as Map 端落盘
+    participant F as shuffle 文件
+
+    T0->>S: compute(reduce 0)
+    S->>M: ensureMapPhase()
+    M->>F: 写出 3 x 2 个 map_*_reduce_* 文件
+    T1->>S: compute(reduce 1)
+    S-->>T1: Map 阶段已经完成
+    S->>F: 读取 *_reduce_0 文件
+    S-->>T0: 返回 reduce 0 结果
+    S->>F: 读取 *_reduce_1 文件
+    S-->>T1: 返回 reduce 1 结果
+```
+
+也就是说，`TaskScheduler` 只知道“有 2 个 Reduce 分区要并行算”。至于第一次进入 `ShuffledRDD.compute()` 时为什么会先写 `3 × 2` 个文件，是 `ShuffledRDD` 在当前结构里的职责。
 
 结果里 key 的顺序不重要。当前实现最后从 `HashMap` 取结果，输出顺序可能和前面列出的期望顺序不同；只要每个 key 的计数对上，就是正确结果。
 
@@ -427,7 +563,7 @@ Shuffle 不是一个抽象名词。
 
 ## 6.8 本章小结
 
-本章在第 5 章的 TaskScheduler 基础上，只增加了一个最小版 `reduceByKey`。
+本章在上一章的 TaskScheduler 基础上，只增加了一个最小版 `reduceByKey`。
 
 它做的事情可以压缩成三步：
 
