@@ -66,6 +66,9 @@ public final class NetworkTaskScheduler implements TaskScheduler {
             try {
                 return sendTask(workerAddress, task, retries);
             } catch (RuntimeException e) {
+                if (e instanceof FetchFailedException fetchFailure) {
+                    throw fetchFailure;
+                }
                 if (retries >= maxTaskRetries) {
                     throw new IllegalStateException(
                             task + " failed after "
