@@ -30,5 +30,6 @@
     <module>ch06-shuffle</module>
     <module>ch07-stage-dag</module>
     <module>ch08-fault-tolerance</module>
+    <module>ch09-network-rpc</module>
   </modules>
 </project>
