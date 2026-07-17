@@ -61,18 +61,11 @@ public final class Main {
         System.out.println("\n=== 2. 让 Map 分区 0 第一次读取到第 2 条时失败 ===");
         AtomicInteger remainingFailures = new AtomicInteger(1);
 
-        RDD<KeyValuePair<String, Integer>> source = sc.parallelize(words, 3);
-        RDD<KeyValuePair<String, Integer>> mapped =
-                source.map(Function.identity());
-        RDD<KeyValuePair<String, Integer>> faulty = new FaultyRDD<>(
-                mapped,
-                0,
-                2,
-                remainingFailures);
-
-        ShuffledRDD<String, Integer> shuffled = faulty.reduceByKey(
-                Integer::sum,
-                2);
+        ShuffledRDD<String, Integer> shuffled =
+                sc.parallelize(words, 3)
+                        .map(Function.identity())
+                        .failOnNext(0, 2, remainingFailures)
+                        .reduceByKey(Integer::sum, 2);
         return toSortedMap(shuffled.collect());
     }
 

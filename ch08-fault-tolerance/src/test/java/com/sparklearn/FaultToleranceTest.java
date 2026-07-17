@@ -19,17 +19,17 @@ final class FaultToleranceTest {
 
     @Test
     void taskSchedulerRetriesOnlyTheFailedTask() {
-        AtomicInteger firstTaskAttempts = new AtomicInteger();
-        AtomicInteger secondTaskAttempts = new AtomicInteger();
+        AtomicInteger failedTaskAttempts = new AtomicInteger();
+        AtomicInteger healthyTaskAttempts = new AtomicInteger();
 
         Callable<Integer> failsOnce = () -> {
-            if (firstTaskAttempts.incrementAndGet() == 1) {
+            if (failedTaskAttempts.incrementAndGet() == 1) {
                 throw new IllegalStateException("transient failure");
             }
             return 10;
         };
         Callable<Integer> succeedsImmediately = () -> {
-            secondTaskAttempts.incrementAndGet();
+            healthyTaskAttempts.incrementAndGet();
             return 20;
         };
 
@@ -41,8 +41,8 @@ final class FaultToleranceTest {
                             succeedsImmediately)));
         }
 
-        assertEquals(2, firstTaskAttempts.get());
-        assertEquals(1, secondTaskAttempts.get());
+        assertEquals(2, failedTaskAttempts.get());
+        assertEquals(1, healthyTaskAttempts.get());
     }
 
     @Test
@@ -71,8 +71,7 @@ final class FaultToleranceTest {
                     List.of(1, 2, 3, 4, 5, 6),
                     3);
             RDD<Integer> mapped = source.map(value -> value * 10);
-            RDD<Integer> faulty = new FaultyRDD<>(
-                    mapped,
+            RDD<Integer> faulty = mapped.failOnNext(
                     0,
                     2,
                     remainingFailures);
@@ -92,14 +91,9 @@ final class FaultToleranceTest {
         try (SparkContext sc = new SparkContext(2, 1, false)) {
             RDD<KeyValuePair<String, Integer>> source =
                     sc.parallelize(words(), 3);
-            RDD<KeyValuePair<String, Integer>> faulty = new FaultyRDD<>(
-                    source,
-                    0,
-                    2,
-                    remainingFailures);
-            ShuffledRDD<String, Integer> shuffled = faulty.reduceByKey(
-                    Integer::sum,
-                    2);
+            ShuffledRDD<String, Integer> shuffled = source
+                    .failOnNext(0, 2, remainingFailures)
+                    .reduceByKey(Integer::sum, 2);
 
             try {
                 assertEquals(Map.of(

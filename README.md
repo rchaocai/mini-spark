@@ -15,7 +15,7 @@
 | 5 | 从分区到 Task | `ch05-multithread-task` |
 | 6 | 亲手写一个 Shuffle | `ch06-shuffle` |
 | 7 | 划分 Stage 与 DAG | `ch07-stage-dag` |
-| 8 | 容错：FaultyIterator 与重算 | `ch08-fault-tolerance` |
+| 8 | 容错：从 Task 重试到 Stage 恢复 | `ch08-fault-tolerance` |
 | 9 | 从线程池到真正的网络 | `ch09-network-rpc` |
 | 10 | Cache 与 Checkpoint | `ch10-cache-checkpoint` |
 | 11 | 致敬工业级 Spark | `ch11-real-spark` |

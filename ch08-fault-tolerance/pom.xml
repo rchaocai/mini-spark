@@ -9,7 +9,7 @@
     <version>0.1-SNAPSHOT</version>
   </parent>
   <artifactId>ch08-fault-tolerance</artifactId>
-  <name>第 8 章 · 容错：FaultyIterator 与重算</name>
+  <name>第 8 章 · 容错：从 Task 重试到 Stage 恢复</name>
   <description>《手写 mini-Spark》第 8 章代码快照：容错、失败重试与重算。</description>
 
   <dependencies>

@@ -5,6 +5,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -57,6 +58,20 @@ public abstract class RDD<T> {
         return new MapPartitionsRDD<>(
                 this,
                 iterator -> new MappingIterator<>(iterator, elementFunction));
+    }
+
+    /**
+     * 测试和演示用变换：让指定分区在读取到第 N 个元素时模拟失败。
+     */
+    public FaultyRDD<T> failOnNext(
+            int partitionIndex,
+            int failOnNextCall,
+            AtomicInteger remainingFailures) {
+        return new FaultyRDD<>(
+                this,
+                partitionIndex,
+                failOnNextCall,
+                remainingFailures);
     }
 
     /**
