@@ -12,9 +12,9 @@ import org.junit.jupiter.api.Test;
 final class NetworkTaskSchedulerTest {
 
     @Test
-    void resultTaskCanRunInWorkerJvm() throws Exception {
+    void resultTaskCanRunInExecutorJvm() throws Exception {
         int port = availablePort();
-        WorkerHandle worker = startWorker(port);
+        ExecutorHandle executor = startExecutor(port);
 
         try (SparkContext sc = new SparkContext(
                 new NetworkTaskScheduler(
@@ -33,14 +33,14 @@ final class NetworkTaskSchedulerTest {
                                     || value.startsWith("H"))
                             .collect());
         } finally {
-            worker.close();
+            executor.close();
         }
     }
 
     @Test
     void fetchFailureIsReportedToDriverWithoutTaskRetry() throws Exception {
         int port = availablePort();
-        WorkerHandle worker = startWorker(port);
+        ExecutorHandle executor = startExecutor(port);
 
         try (SparkContext sc = new SparkContext(1);
              NetworkTaskScheduler scheduler = new NetworkTaskScheduler(
@@ -58,7 +58,28 @@ final class NetworkTaskSchedulerTest {
             assertEquals(0, failure.mapId());
             assertEquals(0, failure.reduceId());
         } finally {
-            worker.close();
+            executor.close();
+        }
+    }
+
+    @Test
+    void preferredLocationIsUsedBeforeRoundRobinExecutor() throws Exception {
+        int unreachablePort = availablePort();
+        int preferredPort = availablePort();
+        ExecutorHandle executor = startExecutor(preferredPort);
+
+        try (NetworkTaskScheduler scheduler = new NetworkTaskScheduler(
+                List.of(
+                        "localhost:" + unreachablePort,
+                        "localhost:" + preferredPort),
+                0,
+                false)) {
+            List<String> result = scheduler.submitTasks(List.of(
+                    new PreferredLocationTask("localhost:" + preferredPort)));
+
+            assertEquals(List.of("partition-0"), result);
+        } finally {
+            executor.close();
         }
     }
 
@@ -68,17 +89,17 @@ final class NetworkTaskSchedulerTest {
         }
     }
 
-    private static WorkerHandle startWorker(int port) {
-        Worker worker = new Worker(port);
-        Thread workerThread = new Thread(() -> {
+    private static ExecutorHandle startExecutor(int port) {
+        Executor executor = new Executor(port);
+        Thread executorThread = new Thread(() -> {
             try {
-                worker.start();
+                executor.start();
             } catch (IOException e) {
                 throw new IllegalStateException(e);
             }
-        }, "test-worker");
-        workerThread.start();
-        return new WorkerHandle(worker, workerThread);
+        }, "test-executor");
+        executorThread.start();
+        return new ExecutorHandle(executor, executorThread);
     }
 
     @SuppressWarnings("unchecked")
@@ -92,12 +113,12 @@ final class NetworkTaskSchedulerTest {
                 shuffled.dependencies().get(0);
     }
 
-    private record WorkerHandle(Worker worker, Thread thread)
+    private record ExecutorHandle(Executor executor, Thread thread)
             implements AutoCloseable {
 
         @Override
         public void close() throws Exception {
-            worker.close();
+            executor.close();
             thread.join(1_000);
         }
     }
@@ -120,6 +141,26 @@ final class NetworkTaskSchedulerTest {
                     0,
                     new File("missing-shuffle-file"),
                     new IOException("missing"));
+        }
+    }
+
+    private static final class PreferredLocationTask extends Task<String> {
+
+        private final String location;
+
+        private PreferredLocationTask(String location) {
+            super(0, 0);
+            this.location = location;
+        }
+
+        @Override
+        protected String runTask(TaskContext context) {
+            return "partition-" + context.partition();
+        }
+
+        @Override
+        public List<String> preferredLocations() {
+            return List.of(location);
         }
     }
 }

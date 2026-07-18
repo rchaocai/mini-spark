@@ -3,7 +3,7 @@ package com.sparklearn;
 import java.io.Serializable;
 
 /**
- * Worker 回传给 Driver 的任务执行结果。
+ * Executor 回传给 Driver 的任务执行结果。
  */
 public record RemoteTaskResult<T>(
         boolean success,

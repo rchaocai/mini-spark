@@ -45,7 +45,7 @@ public abstract class RDD<T> implements Serializable {
     }
 
     /**
-     * 当前分区更适合在哪些 Worker 上计算。默认没有偏好。
+     * 当前分区更适合在哪些 Executor 上计算。默认没有偏好。
      */
     public List<String> preferredLocations(Partition partition) {
         Objects.requireNonNull(partition, "partition");

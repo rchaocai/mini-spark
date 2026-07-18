@@ -7,7 +7,7 @@ import java.util.TreeMap;
 import java.util.stream.Collectors;
 
 /**
- * 线程池执行与 Socket Worker 执行的对比入口。
+ * 线程池执行与 Socket Executor 执行的对比入口。
  */
 public final class Main {
 
@@ -46,7 +46,7 @@ public final class Main {
     }
 
     private static void runNetworkDemo(String[] args) {
-        String workerAddress = args.length >= 2 ? args[1] : "localhost:9091";
+        String executorAddress = args.length >= 2 ? args[1] : "localhost:9091";
         List<KeyValuePair<String, Integer>> words = Arrays.asList(
                 new KeyValuePair<>("hello", 1),
                 new KeyValuePair<>("world", 1),
@@ -59,14 +59,14 @@ public final class Main {
                 new KeyValuePair<>("hello", 1));
 
         try (SparkContext sc = new SparkContext(
-                new NetworkTaskScheduler(List.of(workerAddress), 2, true),
+                new NetworkTaskScheduler(List.of(executorAddress), 2, true),
                 true)) {
             long started = System.nanoTime();
             Map<String, Integer> result = runWordCount(sc, words);
             long elapsedMillis = elapsedMillis(started);
 
-            System.out.println("=== Socket Worker 执行 ===");
-            System.out.println("Worker: " + workerAddress);
+            System.out.println("=== Socket Executor 执行 ===");
+            System.out.println("Executor: " + executorAddress);
             System.out.println("结果: " + result);
             System.out.println("耗时: " + elapsedMillis + " ms");
         }

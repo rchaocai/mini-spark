@@ -37,7 +37,7 @@ bookToc: false
 
 | 章 | 标题 |
 |---|------|
-| 9 | 从线程池到真正的网络 |
+| 9 | 从单机到分布式执行 |
 | 10 | Cache 与 Checkpoint |
 | 11 | 致敬工业级 Spark |
 | 12 | 从 RDD 到 DataFrame |

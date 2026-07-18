@@ -10,7 +10,7 @@
   </parent>
   <artifactId>ch09-network-rpc</artifactId>
   <name>第 9 章 · 从线程池到真正的网络</name>
-  <description>《手写 mini-Spark》第 9 章代码快照：Socket、序列化与跨进程 Worker。</description>
+  <description>《手写 mini-Spark》第 9 章代码快照：Socket、序列化与跨进程 Executor。</description>
 
   <dependencies>
     <dependency>

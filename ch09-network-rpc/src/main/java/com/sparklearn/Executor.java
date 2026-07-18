@@ -9,17 +9,17 @@ import java.net.ServerSocket;
 import java.net.Socket;
 
 /**
- * 独立 JVM 里的 Worker。
+ * 独立 JVM 里的 Executor。
  *
  * <p>Driver 发来的 Task 在这里反序列化，然后调用同一个 run() 方法执行。
  */
-public final class Worker implements AutoCloseable {
+public final class Executor implements AutoCloseable {
 
     private final int port;
     private volatile boolean running;
     private ServerSocket serverSocket;
 
-    public Worker(int port) {
+    public Executor(int port) {
         this.port = port;
     }
 
@@ -27,7 +27,7 @@ public final class Worker implements AutoCloseable {
         running = true;
         try (ServerSocket socket = new ServerSocket(port)) {
             serverSocket = socket;
-            System.out.println("[Worker] 监听端口 " + port);
+            System.out.println("[Executor] 监听端口 " + port);
             while (running) {
                 try {
                     handle(socket.accept());
@@ -73,9 +73,9 @@ public final class Worker implements AutoCloseable {
 
     public static void main(String[] args) throws IOException {
         if (args.length != 1) {
-            System.out.println("用法: java com.sparklearn.Worker <port>");
+            System.out.println("用法: java com.sparklearn.Executor <port>");
             return;
         }
-        new Worker(Integer.parseInt(args[0])).start();
+        new Executor(Integer.parseInt(args[0])).start();
     }
 }

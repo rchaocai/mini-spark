@@ -6,8 +6,8 @@ import java.util.List;
 /**
  * DAGScheduler 创建的最小执行单元。
  *
- * <p>真实 Spark 的 Task 也是可序列化对象，并由 Executor 调用 run()。
- * 本章保留同样的骨架，让线程池版和网络版都提交 Task，而不是提交任意 Callable。
+ * <p>Task 是可序列化对象，由调度器提交，再由线程池或 Executor 调用 run()。
+ * 这样线程池版和网络版都提交同一种执行单元，而不是提交任意 Callable。
  *
  * @param <T> Task 返回值类型
  */
@@ -39,4 +39,3 @@ public abstract class Task<T> implements Serializable {
         return partition;
     }
 }
-

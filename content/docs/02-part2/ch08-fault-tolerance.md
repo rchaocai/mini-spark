@@ -1402,7 +1402,7 @@ RDD 选择限制表达方式：
 
 为了保持认知主线，本章仍然留下几条工程边界。
 
-第一，只模拟 JVM 内部的 Task 异常和本地 shuffle 文件丢失，没有模拟 Worker 进程退出。所有 Task 仍然运行在同一个线程池里。
+第一，只模拟 JVM 内部的 Task 异常和本地 shuffle 文件丢失，没有模拟 Executor 进程退出。所有 Task 仍然运行在同一个线程池里。
 
 第二，`FetchFailedException` 直接携带 `ShuffleDependency` 对象。跨进程以后需要改成稳定的 `shuffleId` 等标识，再由 Driver 查找对应 Stage。
 
@@ -1461,4 +1461,4 @@ ResultTask 读取不到 Map 输出
 
 但重算正确不是无条件的。它仍然依赖稳定数据源、不可变 RDD 语义、确定性变换，以及不会因重复执行而出错的外部写入。
 
-下一章会把 Task 从本地线程池送到真正的 Worker。到了网络环境里，`FetchFailedException` 不能再携带一个只在当前 JVM 有意义的对象引用；Driver 与 Worker 之间必须使用可序列化的任务描述、稳定 ID 和网络协议。这正好把本章的容错边界推向真正的分布式环境。
+下一章会把 Task 从本地线程池送到真正的 Executor。到了网络环境里，`FetchFailedException` 不能再携带一个只在当前 JVM 有意义的对象引用；Driver 与 Executor 之间必须使用可序列化的任务描述、稳定 ID 和网络协议。这正好把本章的容错边界推向真正的分布式环境。

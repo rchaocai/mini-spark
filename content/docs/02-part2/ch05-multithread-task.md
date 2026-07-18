@@ -694,13 +694,13 @@ for (Future<PartitionResult<T>> future : futures) {
 
 演示模式下，多个 Task 会并发打印线程名，所以日志顺序可能交错；这些打印不参与 RDD 结果计算。
 
-### 从同一 JVM 到远程 Worker，还差什么
+### 从同一 JVM 到远程 Executor，还差什么
 
 到这里，单机多线程的主实验已经完整跑通。现在再看它与分布式执行之间的边界：
 
 ```text
 本章：Task 对象或 Lambda -> 同一 JVM 的线程池
-远程执行：Task 及其依赖 -> 字节流 -> 另一个 JVM 的 Worker
+远程执行：Task 及其依赖 -> 字节流 -> 另一个 JVM 的 Executor
 ```
 
 同一个 JVM 中的线程共享堆内存，线程池可以直接使用 `CollectTask`、RDD 和用户函数的对象引用。另一个 JVM 无法使用这些引用；要跨进程传输，必须先把任务及其依赖转换成字节流。
@@ -736,7 +736,7 @@ public final class CollectTask<T> implements Callable<List<T>> {
 executor.submit(new CollectTask<>(rdd, partition));
 ```
 
-`CollectTask` 只实现了 `Callable`，没有实现 `Serializable`；`TaskScheduler` 也只是把它提交给 `ExecutorService`，没有连接 Worker。此时的“提交”只表示把一个对象交给同一 JVM 中的工作线程。
+`CollectTask` 只实现了 `Callable`，没有实现 `Serializable`；`TaskScheduler` 也只是把它提交给 `ExecutorService`，没有连接远程 Executor。此时的“提交”只表示把一个对象交给同一 JVM 中的工作线程。
 
 后面的章节会沿着这条边界继续推进：
 
@@ -744,7 +744,7 @@ executor.submit(new CollectTask<>(rdd, partition));
 第 6 章：同一个 key 散落在不同分区时，先用 shuffle 重新分布数据
 第 7 章：根据 shuffle 边界，把一项作业划分成 Stage 和 DAG
 第 8 章：某个 Task 失败时，沿血缘重算对应分区
-第 9 章：通过 Socket 把 Task 发给 Worker，并让 Worker 可以运行在另一个 JVM
+第 9 章：通过 Socket 把 Task 发给 Executor，并让 Executor 可以运行在另一个 JVM
 ```
 
 ## 5.9 动手验证：看日志，也跑测试
