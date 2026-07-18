@@ -182,7 +182,9 @@ Executor 执行完 Task 后，把结果也序列化回来。Driver 再用 `readO
 
 引用只在同一个 JVM 里有意义。字节流可以穿过 Socket，到另一个 JVM 里重新变成对象。
 
-> [!INFO] 序列化发送的是对象状态，不是 class 文件
+> [!INFO]
+> **序列化发送的是对象状态，不是 class 文件**
+>
 > `writeObject(...)` 会把对象字段里的状态写出去，比如 `ResultTask` 里的 `rdd`、`partition`、用户函数。
 >
 > 它不会把 `ResultTask.class`、`ListRDD.class` 这些类定义一起发过去。Executor JVM 必须已经在 classpath 里加载得到同一套代码；否则 `readObject()` 找不到类，Task 还没开始运行就会失败。
@@ -391,7 +393,9 @@ rdd.map(value -> prefix.value() + value);
 
 但有些东西不应该放进闭包里，比如 `FileInputStream`、数据库连接、线程池。它们代表的是 Driver 进程里的某个运行时资源，不是一份稳定的数据。即使强行让类型实现了 `Serializable`，传到另一个 JVM 后通常也没有原来的含义。更稳妥的做法，是在 Executor 侧按需创建这些资源，或者只把连接参数、文件路径这类小配置传过去。
 
-> [!INFO] 真实 Spark 怎么处理闭包
+> [!INFO]
+> **真实 Spark 怎么处理闭包**
+>
 > 真实 Spark 也要处理同一个问题。用户写的 `map`、`filter`、`foreach` 这类函数，会和 Task 一起形成闭包。提交 Task 前，Spark 会分析这个闭包，把 Executor 运行时真正需要的变量整理出来，再交给后面的序列化层发送到 Executor。
 >
 > Spark 里有 `ClosureCleaner` / `SparkClosureCleaner` 这类组件做这件事。比如一个 lambda 只用到了外部对象里的一个普通字符串，但编译后的闭包可能顺手带上了整个外部对象。Cleaner 会尽量剪掉这些没用到的引用，避免一个本来只需要带字符串的 Task，因为多带了外部对象而序列化失败。
@@ -499,6 +503,15 @@ flowchart TB
 
 所以，远程执行并不是 Executor 临时“拼出一段代码”再运行。代码的 class 必须已经在 Executor 的 classpath 里；网络上传过来的是对象状态。对象还原以后，Executor 像本地线程池一样调用 `run()`，只是这个对象来自 Socket。
 
+> [!INFO]
+> **为什么这里不需要反射**
+>
+> 反射解决的是另一类问题：运行时才知道类名、方法名，然后用字符串去找类、找方法、再调用。比如一个通用 RPC 框架收到 `"method": "add"`，它可能需要用反射找到 `add(...)` 方法。
+>
+> 本章不需要这样做，因为协议里传来的不是“类名 + 方法名”，而是已经反序列化好的 `Task` 对象。Executor 只调用固定入口 `task.run(...)`，至于它实际走 `ResultTask.runTask(...)` 还是 `ShuffleMapTask.runTask(...)`，交给 Java 普通多态完成。
+>
+> 简单说：反射是“拿名字找代码”，多态是“对象自己知道该执行哪段代码”。本章用的是后者。
+
 如果 `run()` 抛出异常，Executor 不会让连接直接断掉，而是把失败也包装成 `RemoteTaskResult.failure(e)`。Driver 读到响应后再判断：
 
 ```java
@@ -517,7 +530,9 @@ if (!response.success()) {
 
 这就是本章想让你亲手摸到的“RPC”本质。RPC 框架可以更复杂，可以复用连接，可以异步，可以压缩，可以做心跳和失败探测。但在这些能力出现之前，先要有这条请求和响应路径。
 
-> [!INFO] 真实 Spark 的序列化和 RPC
+> [!INFO]
+> **真实 Spark 的序列化和 RPC**
+>
 > 本章用 `ObjectOutputStream` 把对象写进 `Socket`，是为了让你看见最小的一条链路。
 >
 > 真实 Spark 把这件事拆成两层。第一层是序列化：`JavaSerializer` 使用 Java 自带对象序列化，`KryoSerializer` 使用开源库 Kryo。Kryo 通常比 Java 序列化更快、结果也更紧凑，但为了更好性能，常常需要提前注册自定义类。
@@ -558,33 +573,33 @@ SparkContext、调度器、线程池，属于 Driver 控制面，不发。
 
 ## 9.6 preferredLocations：把 Task 发到数据那里
 
-第 4 章讲 RDD 五个属性时，`preferredLocations` 先按下不表。第 5 章也埋过一个点：Task 无状态以后，调度器就可以决定把它派到哪里。
+现在 Task 已经能发到另一个 JVM 了。接下来会出现一个很自然的问题：
 
-到这一章，它终于有意义了。
+```text
+如果有多个 Executor，这个 Task 应该发给谁？
+```
 
-先把边界说在前面：本章的 `ListRDD` 还是内存演示 RDD。它把完整 `List` 保存在对象字段里。网络发送 `Task` 时，`ResultTask -> RDD -> ListRDD -> data` 这条引用链会被一起序列化，所以 demo 里确实会把内存数据也发给 Executor。
+最朴素的答案是轮询：第一个 Task 发给 Executor-1，第二个发给 Executor-2，依次循环。这样可以跑，但不够好。
+
+因为分布式计算里，数据常常已经在某台机器上。比如分区 0 的文件块在 Executor-1 附近，分区 1 的文件块在 Executor-2 附近。此时把分区 0 的 Task 发给 Executor-1，就只需要移动一小段计算描述；如果发给 Executor-2，可能就要跨网络搬一大块数据。
+
+所以第 4 章先按下不表的 `preferredLocations`，到这里终于有了用途：它回答的是“这个分区更适合在哪些 Executor 上计算”。
 
 ```mermaid
 flowchart LR
-    subgraph A["本章 ListRDD"]
-        T1["Task"]
-        R1["RDD 血缘"]
-        D1["ListRDD.data"]
-        T1 --> R1 --> D1
-    end
+    L["ListRDD<br/>分区 0 偏好 Executor-1"]
+    M["MapPartitionsRDD<br/>沿用父分区位置"]
+    T["ResultTask<br/>携带最终 RDD + 分区号"]
+    S["NetworkTaskScheduler<br/>选择 Executor"]
+    E1["Executor-1"]
+    E2["Executor-2"]
 
-    subgraph B["更完整的集群存储"]
-        T2["Task"]
-        R2["分区读取描述"]
-        W2["Executor 本地 block / 文件分片"]
-        T2 --> R2
-        R2 -.调度到对应机器后读取.-> W2
-    end
+    L --> M --> T --> S
+    S -->|"命中 preferredLocations"| E1
+    S -.没有命中时轮询.-> E2
 ```
 
-也就是说，本章先把“调度器能看见位置偏好”这件事做出来。真正的大数据系统里，Task 里通常带的是“这个分区怎么读”的描述，不是把几百 MB 数据塞进 Task 对象。
-
-本章给 RDD 增加默认方法：
+先看源头。`RDD` 增加一个默认方法：
 
 ```java
 public List<String> preferredLocations(Partition partition) {
@@ -592,7 +607,29 @@ public List<String> preferredLocations(Partition partition) {
 }
 ```
 
-`ListRDD` 可以为每个分区提供位置偏好。`MapPartitionsRDD`、`FaultyRDD` 这类窄依赖 RDD，会把父分区的位置偏好继续传下来：
+默认返回空列表，意思是“我没有位置偏好”。源头 RDD 如果知道数据在哪，就可以覆盖它。本章的 `ListRDD` 是内存演示 RDD，但为了把接口形状做出来，也允许每个分区带一组位置偏好：
+
+```java
+public ListRDD(
+        SparkContext sparkContext,
+        List<T> data,
+        int numberOfPartitions,
+        List<List<String>> preferredLocations) {
+    ...
+}
+```
+
+比如 3 个分区可以这样描述：
+
+```text
+partition 0 -> localhost:9091
+partition 1 -> localhost:9092
+partition 2 -> 没有偏好
+```
+
+真实系统里的位置通常来自 HDFS block、本地文件分片、缓存 block 或 shuffle block；本章先用字符串地址模拟这个信息。
+
+再看变换 RDD。`map`、`filter` 这类窄依赖不会改变分区对应关系：子分区 0 仍然读取父分区 0，子分区 1 仍然读取父分区 1。所以 `MapPartitionsRDD` 不需要自己发明位置，只要把父分区的位置传下来：
 
 ```java
 @Override
@@ -601,7 +638,18 @@ public List<String> preferredLocations(Partition partition) {
 }
 ```
 
-网络调度器选择 Executor 时，先看 Task 有没有位置偏好：
+然后看 Task。`ResultTask` 持有最终 RDD 和当前分区，所以它可以把这个问题转交给 RDD：
+
+```java
+@Override
+public List<String> preferredLocations() {
+    return rdd.preferredLocations(partition);
+}
+```
+
+这样，位置偏好就从源头 RDD，一路经过窄依赖 RDD，传到了 Task。
+
+最后才轮到调度器选择 Executor。`NetworkTaskScheduler` 的策略很短：
 
 ```java
 for (String location : task.preferredLocations()) {
@@ -612,7 +660,13 @@ for (String location : task.preferredLocations()) {
 return executorAddresses.get(taskIndex % executorAddresses.size());
 ```
 
-这段代码表达的是一个具体选择：先看数据位置，能命中就把 Task 发过去；没有命中，再退回轮询。
+这段代码表达的是一个具体选择：
+
+```text
+先看 Task 有没有位置偏好
+  -> 如果偏好的 Executor 正好可用，就发过去
+  -> 如果没有偏好，或者偏好的地址不在当前 Executor 列表里，就退回轮询
+```
 
 如果数据在 Executor-1，把 Task 发给 Executor-1，网络上传的是 Task：闭包、RDD 血缘、分区号。通常是几 KB 到几 MB。
 
@@ -626,7 +680,16 @@ return executorAddresses.get(taskIndex % executorAddresses.size());
 
 Task 是说明书，数据是货物。能寄说明书，就不要搬货物。
 
-更完整的调度器会沿窄依赖向上找位置偏好：当前 RDD 没有，就看父 RDD；父 RDD 也没有，再继续往上。本章的实现只做了最直观的一层委托。
+> [!INFO]
+> **数据为什么会在某个 Executor 附近？**
+>
+> 经典 Spark 集群常常和 HDFS 放在一起使用。HDFS 会把大文件切成 block，分散存到多台机器的 DataNode 上；Spark 的 Executor 也运行在这些机器上。于是某个输入分区可能正好对应机器 A 上的一个 HDFS block，把 Task 派到机器 A 的 Executor，就能尽量从本地磁盘读取，少走网络。
+>
+> 数据位置不只来自 HDFS。缓存后的 RDD 分区会留在某个 Executor 的内存或磁盘里；shuffle map 输出也会先落在某个 Executor 本地。调度器如果知道这些位置，就可以优先把后续 Task 派到数据附近。
+>
+> 本章的 `ListRDD` 还只是内存演示 RDD。它把完整 `List` 保存在对象字段里，所以网络发送 `Task` 时，`ResultTask -> RDD -> ListRDD -> data` 这条引用链会被一起序列化。这里的 `preferredLocations` 先用字符串地址模拟真实系统里的数据位置；真正的大数据系统里，Task 通常带的是“这个分区怎么读”的描述，而不是把几百 MB 数据本体塞进 Task。
+>
+> 更完整的调度器还会沿窄依赖继续向上找位置偏好：当前 RDD 没有，就看父 RDD；父 RDD 也没有，再继续往上。本章先做最直观的一层委托。
 
 所以本章先兑现调度接口和位置偏好的形状；真正“不搬数据，只发计算”的前提，是源头 RDD 不能把大数据本体直接放进要序列化的对象图里。
 
@@ -799,7 +862,9 @@ shuffle 文件仍沿用第 8 章的本地文件模型
 
 把边界说清楚，反而更接近真实工程。你知道现在写到哪一层，也知道下一层复杂度从哪里长出来。
 
-> [!INFO] 后面读 Spark 源码时怎么对
+> [!INFO]
+> **后面读 Spark 源码时怎么对**
+>
 > 本章新增类名时，刻意贴近 Spark 源码，而不是另起一套“教学命名”。第 11 章会正式展开源码对照；这里先留一个路标：
 >
 > ```text
