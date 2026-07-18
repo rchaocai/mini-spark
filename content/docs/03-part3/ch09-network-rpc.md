@@ -649,24 +649,67 @@ public List<String> preferredLocations() {
 
 这样，位置偏好就从源头 RDD，一路经过窄依赖 RDD，传到了 Task。
 
-最后才轮到调度器选择 Executor。`NetworkTaskScheduler` 的策略很短：
+最后才轮到调度器选择 Executor。这里如果只看选择 Executor 的几行代码，会有两个问题：`task` 是从哪里来的？`taskIndex` 又是谁传进来的？
+
+先从外层开始看。`NetworkTaskScheduler` 收到的不是一个 Task，而是一批 Task。`submitTasks(...)` 用第一层循环依次取出它们：
 
 ```java
-for (String location : task.preferredLocations()) {
-    if (executorAddresses.contains(location)) {
-        return location;
+public <T> List<T> submitTasks(List<? extends Task<T>> tasks) {
+    List<T> result = new ArrayList<>();
+
+    for (int index = 0; index < tasks.size(); index++) {
+        Task<T> task = tasks.get(index);
+        result.add(sendWithRetry(task, index));
     }
+
+    return result;
 }
-return executorAddresses.get(taskIndex % executorAddresses.size());
 ```
 
-这段代码表达的是一个具体选择：
+这里的 `index` 就是后面看到的 `taskIndex`。它表示当前 Task 在这批任务中的位置：第一个是 0，第二个是 1，第三个是 2。
+
+`sendWithRetry(task, index)` 准备发送 Task 时，会调用：
+
+```java
+String executorAddress = executorFor(task, taskIndex);
+```
+
+现在再进入 `executorFor(...)`，看第二层循环：
+
+```java
+private String executorFor(Task<?> task, int taskIndex) {
+    for (String location : task.preferredLocations()) {
+        if (executorAddresses.contains(location)) {
+            return location;
+        }
+    }
+
+    return executorAddresses.get(
+            taskIndex % executorAddresses.size());
+}
+```
+
+两层循环遍历的对象不同：
 
 ```text
-先看 Task 有没有位置偏好
-  -> 如果偏好的 Executor 正好可用，就发过去
-  -> 如果没有偏好，或者偏好的地址不在当前 Executor 列表里，就退回轮询
+第一层循环：遍历这一批 Task
+  -> 取出当前 task
+  -> 把 task 和它的 taskIndex 交给 sendWithRetry(...)
+
+第二层循环：遍历当前 Task 的位置偏好
+  -> 如果某个偏好地址也在可用 Executor 列表中，立即选中它
+  -> 如果所有偏好地址都不可用，或者 Task 根本没有位置偏好，就退回轮询
 ```
+
+轮询发生在最后一行。假设有两个 Executor，Task 的位置偏好又没有命中：
+
+```text
+taskIndex = 0 -> executorAddresses.get(0 % 2) -> Executor-0
+taskIndex = 1 -> executorAddresses.get(1 % 2) -> Executor-1
+taskIndex = 2 -> executorAddresses.get(2 % 2) -> Executor-0
+```
+
+因此，这段调度逻辑的顺序是：**先尝试把 Task 送到数据附近；做不到时，再用 `taskIndex` 轮询 Executor。**
 
 如果数据在 Executor-1，把 Task 发给 Executor-1，网络上传的是 Task：闭包、RDD 血缘、分区号。通常是几 KB 到几 MB。
 
@@ -697,7 +740,7 @@ Task 是说明书，数据是货物。能寄说明书，就不要搬货物。
 
 ## 9.7 网络到底贵在哪里
 
-线程池版提交一个 Task，主要成本是：
+线程池版提交一个 Task 时，Task 没有离开当前 JVM。`LocalTaskScheduler` 只是把这个 Task 对象的引用交给线程池：
 
 ```text
 把引用放进队列
@@ -705,7 +748,19 @@ Task 是说明书，数据是货物。能寄说明书，就不要搬货物。
 调用 run()
 ```
 
-网络版提交一个 Task，成本变成：
+这几步是执行路径，不全是额外成本。尤其是 `run()`，它是 Task 本来就要做的计算；不管用线程池、Socket Executor，还是直接在当前线程调用，最终都要执行它。
+
+线程池真正额外增加的，是为了把 Task 交给另一个线程而付出的协调开销：
+
+```text
+提交线程和工作线程通过并发队列交接 Task
+工作线程可能发生的唤醒与操作系统调度
+通过 Future 保存结果、通知等待线程
+```
+
+这些操作需要原子指令、锁或线程调度，但 Task 对象仍在同一个 JVM 中。传递的是引用，不需要把整个 Task 序列化，也不需要经过 Socket。
+
+网络版提交 Task 时，边界变了。Executor 在另一个 JVM 里，引用不能跨进程使用。Driver 必须把 Task 变成字节，Executor 再把字节还原成对象：
 
 ```mermaid
 sequenceDiagram
@@ -721,9 +776,11 @@ sequenceDiagram
     Note over D: 反序列化结果
 ```
 
-真正的计算只在中间那一步。其余都是为了跨进程付出的过路费。
+其中 `run()` 仍然是 Task 本身的计算。网络执行额外增加的是 Task 和结果的序列化、字节复制、Socket 系统调用、网络协议处理、反序列化以及等待响应的时间。
 
-还有一个本章刻意保留的简化：`NetworkTaskScheduler` 是同步 RPC。它会发送一个 Task，等结果回来，再发送下一个 Task。第 8 章的 `LocalTaskScheduler` 会先把一批 Task 都提交到线程池，因此保留了分区并行；第 9 章先牺牲这点并行度，把注意力放在 Task 怎样变成字节、怎样在 Executor 里重新运行。
+因此，线程池和网络版都会执行同一个 `run()`。差别不在“算什么”，而在“为了让另一个执行单元开始算，需要怎样交付 Task，又要付出多少交付成本”。
+
+本章的 `NetworkTaskScheduler` 还是同步 RPC。它会发送一个 Task，等结果回来，再发送下一个 Task。第 8 章的 `LocalTaskScheduler` 会先把一批 Task 都提交到线程池，因此保留了分区并行；第 9 章的网络版先只实现跨 JVM 执行这条主线。
 
 ```mermaid
 sequenceDiagram
@@ -748,7 +805,7 @@ sequenceDiagram
     W-->>N: result2
 ```
 
-生产系统当然不会这样串行跑远端分区。它会把一批 Task 分发给多个 Executor，并异步接收完成事件。但如果一上来就实现异步事件循环、连接池和多 Executor 并发，读者会先被工程细节淹没。本章先把“对象怎样过网络”讲清楚。
+生产系统不会这样串行跑远端分区。它会把一批 Task 分发给多个 Executor，并异步接收完成事件。要做到这一点，调度器还需要异步事件循环、连接复用、多个 Executor 的并发提交、任务完成事件队列和失败回调。本章暂时不实现这些机制，只保留最小网络路径：Driver 把 Task 序列化后发给 Executor，Executor 执行后把结果发回 Driver。
 
 即使 Executor 跑在 `localhost`，这笔账也不会消失。数据仍然要经过 Socket、TCP 协议栈、内核缓冲区和用户态 / 内核态切换。`localhost` 只是没有经过物理网卡，不等于免费。
 
@@ -800,13 +857,11 @@ java -Dfile.encoding=UTF-8 \
 
 这就是 Cache 和数据本地性接上的地方。
 
-## 9.8 一个必须说清的教学近似
+## 9.8 shuffle 文件的边界
 
 本章代码保留了第 8 章的 Stage 和 shuffle 文件模型，因此 `reduceByKey` 在网络版 demo 中能在本机 Executor 上跑通。
 
-但这还不是完整的集群 shuffle。
-
-关键原因在文件位置：第 8 章的 shuffle 输出是本地文件。Map Task 写出：
+但这还不是完整的集群 shuffle。第 8 章的 shuffle 输出仍然是本地文件。Map Task 写出：
 
 ```text
 map_0_reduce_0
@@ -816,13 +871,13 @@ map_0_reduce_1
 
 Reduce Task 再按路径读取这些文件。
 
-如果 Driver 和 Executor 只是同一台机器上的两个 JVM，它们可以看到同一个临时目录，教学 demo 可以闭环。
+如果 Driver 和 Executor 只是同一台机器上的两个 JVM，它们可以看到同一个临时目录，demo 就能闭环。
 
 如果真的换成两台机器，这个路径就不成立了。Executor-1 写出的本地文件，Executor-2 不能靠同一个 `File` 路径读到。完整系统需要 `MapOutputTracker` 记录每个 Map 输出在哪台 Executor 上，再让 Reduce 端通过网络去拉对应的数据。
 
 ```mermaid
 flowchart TB
-    subgraph T["本章教学近似：同机两个 JVM"]
+    subgraph T["当前实现：同机两个 JVM"]
         D1["Driver JVM"]
         W1["Executor JVM"]
         F1["同一个本地 shuffle 目录"]
@@ -845,11 +900,11 @@ flowchart TB
     end
 ```
 
-`MapOutputTracker` 解决的正是这个问题：Map 端注册输出位置，Reduce 端查询这些位置。换句话说，它回答“shuffle 文件在哪台机器上”。
+`MapOutputTracker` 解决的正是这个问题：Map 端注册输出位置，Reduce 端查询这些位置。
 
-本章没有实现它，因为这会把主题从“Task 怎样跨进程发送”推进到“shuffle block 怎样跨节点拉取”。那是另一层网络系统。
+当前代码不包含 `MapOutputTracker`。它属于 shuffle block 跨节点拉取层，而不是 Task 跨进程发送层。
 
-所以本章网络实现的定位要清楚：
+当前网络实现覆盖范围如下：
 
 ```text
 已实现：
@@ -857,39 +912,10 @@ Task / RDD 血缘 / 用户闭包跨 JVM 序列化
 Socket Executor 执行 Task，包括 ShuffleMapTask 和 ResultTask
 调度器按 preferredLocations 选择 Executor
 
-教学近似：
+实现边界：
 shuffle 文件仍沿用第 8 章的本地文件模型
 完整跨机器 shuffle 需要 MapOutputTracker / BlockManager
 ```
-
-把边界说清楚，反而更接近真实工程。你知道现在写到哪一层，也知道下一层复杂度从哪里长出来。
-
-> [!INFO]
-> **后面读 Spark 源码时怎么对**
->
-> 本章新增类名时，刻意贴近 Spark 源码，而不是另起一套“教学命名”。第 11 章会正式展开源码对照；这里先留一个路标：
->
-> ```text
-> 本章 Task
->   -> Spark 0.5: core/src/main/scala/spark/Task.scala
->   -> Spark 3.x: core/src/main/scala/org/apache/spark/scheduler/Task.scala
->
-> 本章 ResultTask / ShuffleMapTask
->   -> Spark 0.5: ResultTask.scala / ShuffleMapTask.scala
->   -> Spark 3.x: scheduler/ResultTask.scala / scheduler/ShuffleMapTask.scala
->
-> 本章 TaskScheduler 接口
->   -> Spark 0.5: DAGScheduler.scala 里的 submitTasks 抽象
->   -> Spark 3.x: scheduler/TaskScheduler.scala
->
-> 本章 preferredLocations
->   -> Spark 0.5: RDD.scala + DAGScheduler.getPreferredLocs
->   -> Spark 3.x: RDD.preferredLocations + DAGScheduler.getPreferredLocsInternal
->
-> 本章没有实现的完整跨机器 shuffle
->   -> Spark 0.5: MapOutputTracker.scala
->   -> Spark 3.x: MapOutputTracker / BlockManager / shuffle fetch
-> ```
 
 ## 9.9 本章小结
 
