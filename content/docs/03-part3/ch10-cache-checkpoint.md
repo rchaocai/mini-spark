@@ -14,19 +14,15 @@ summary: "第 8 章证明了血缘可以重算，第 10 章继续追问：如果
 >
 > 运行示例：`java -Dfile.encoding=UTF-8 -cp ch10-cache-checkpoint/target/classes com.sparklearn.Main`
 
-第 8 章我们给 mini-Spark 加了失败重试。
+先抓住上一章留下的判断：血缘能重算，但重算不一定便宜。
 
-当一个 Task 失败时，调度器重新提交这个 Task。Task 再沿着 RDD 血缘，从父 RDD 一层层算回来。只要源数据还在、函数还在、依赖还在，这个分区就能被重算出来。
+当一个 Task 失败时，调度器会重新提交它。Task 再沿着 RDD 血缘，从父 RDD 一层层算回来。只要源数据还在、函数还在、依赖还在，这个分区就能被重算出来。
 
-这句话是对的。
+这句话是对的，但它还不完整。它只回答了“能不能重算”，没有回答“重算要花多少钱”。
 
-但它还不完整。
+前一章已经把执行搬到另一个 JVM。到了那里，Task、RDD 血缘和用户函数都要先序列化，再穿过 Socket，再在 Executor 里反序列化。一次普通计算已经多了一层网络和序列化成本。
 
-因为它只回答了“能不能重算”，没有回答“重算要花多少钱”。
-
-第 9 章又把 Task 发到了另一个 JVM。到了那里，Task、RDD 血缘和用户函数都要先序列化，再穿过 Socket，再在 Executor 里反序列化。一次普通计算已经多了一层网络和序列化成本。
-
-现在想象一条很长的血缘：
+这一章先看一个最容易暴露问题的场景：一条很长的血缘。
 
 ```text
 ListRDD
@@ -61,7 +57,7 @@ checkpoint 更像“重新设一个起点”。结果已经写到磁盘，从这
 
 ## 10.1 长血缘的问题藏在 iterator 里
 
-先回到第 3 章留下来的一个方法：
+要理解 cache 和 checkpoint，先看第 3 章留下来的这个统一入口：
 
 ```java
 public final Iterator<T> iterator(Partition partition) {
@@ -97,13 +93,17 @@ child.compute(partition)
 
 只要没有人拦住这条调用链，它就会一直追到源头。
 
-第 10 章的关键就是：不要改每一个 `compute()`。只改 `iterator()`。
+第 10 章真正要抓住的，不是“多了两个新接口”，而是入口没有变：还是 `iterator()`。
 
-因为 `iterator()` 是所有分区读取的入口。
+因为所有分区读取都经过这里。
+
+在本章这个 mini-Spark 项目里，cache 只要插在这里，就能让后续读取自动命中同一份缓存。
+
+checkpoint 也会先借这个入口改掉“从哪里读数据”。不过它还多一件事：它要让调度器看到“这个 RDD 已经没有父依赖了”。这个依赖边界，我们放到后面的 10.6 再拆。
 
 真实 Spark 的早期源码也是这个设计。`RDD.cache()` 只是设置一个 `shouldCache` 标记；真正读取分区时，`RDD.iterator(split)` 再决定是走缓存，还是调用 `compute(split)`。缓存的复杂实现放在 `CacheTracker.getOrCompute(...)` 后面，但插入点仍然是 `iterator()`。
 
-mini-Spark 也沿用这个位置，只是把工业级的 CacheTracker 简化成一个内存 Map。
+mini-Spark 也沿用这个位置，把 CacheTracker 的职责收束到一个内存 Map 上。
 
 ## 10.2 cache：第一次算，第二次读
 
@@ -120,7 +120,7 @@ cache 的直觉很简单：
   不再调用 compute(partition)
 ```
 
-于是 `RDD` 多了三个字段：
+先只看 cache 需要的状态，`RDD` 多了三个字段：
 
 ```java
 private boolean shouldCache;
@@ -133,6 +133,9 @@ private final AtomicInteger computeCount = new AtomicInteger();
 `cache` 用分区编号做 key，保存这个分区已经算出来的元素列表。
 
 `computeCount` 不是 Spark 的生产功能，只是本章 demo 用来观察“真正调用了几次 compute”。
+它统计的是 `compute()` 被调用的次数，不是元素处理次数，也不是 action 次数。
+
+同一个 `RDD` 类里还有 checkpoint 需要的 `checkpointed` 和 `checkpointDir`。它们暂时先放在一边；这一节只看 cache。等看到完整的 `iterator()` 时，你会发现 checkpoint 的优先级排在 cache 前面。
 
 `cache()` 本身很短：
 
@@ -176,7 +179,9 @@ public final Iterator<T> iterator(Partition partition) {
 
 这段代码的顺序很重要。
 
-没有开 cache 时，和前几章一样，直接 `computeTracked(partition)`。
+第一层先看 checkpoint。一个 RDD 如果已经 checkpoint，就说明它的数据已经物化到文件里，读取时应该直接读文件，而不是再去考虑内存 cache。
+
+第二层才看 cache。没有开 cache 时，和前几章一样，直接 `computeTracked(partition)`。
 
 开了 cache 时，先用分区编号查 `cache`。命中了，就从内存里的列表返回迭代器。
 
@@ -201,6 +206,8 @@ compute 次数: 源头=6，中间点=6，末端=3
 这里有 3 个分区。
 
 第一次 `collect()` 后，源头 `ListRDD` 的 `compute` 调了 3 次。第二次又调了 3 次，所以累计变成 6 次。
+
+这里故意只重置了末端 RDD 的计数，所以 `source` 和中间点显示的是累计值，末端显示的是第二次 action 的次数。
 
 没有 cache 时，每个 action 都重新走一遍上游。
 
@@ -252,16 +259,17 @@ cachedPoint.iterator(partition)
 
 cache 不是越早越好，也不是越晚越好。
 
-它的位置决定两件事：
+先看一个更准确的说法：cache 应该放在会被复用的位置上，通常是几条下游链路的共同上游。
 
 ```text
-缓存点越靠近源头：
-  可短路的上游更少
-  缓存的数据可能更多
+如果一个 RDD 只会被一个下游 action 用一次：
+  cache 它通常不值
 
-缓存点越靠近末端：
-  缓存的数据可能更少
-  但前面仍然要重复计算
+如果一个 RDD 会被多个下游 action 复用：
+  cache 它能让这些 action 共享同一份结果
+
+如果同一条长链会被反复 action 访问：
+  cache 它能让后续 action 直接复用结果
 ```
 
 更准确地说，要看三个因素：
@@ -307,11 +315,13 @@ checkpoint 解决的是另一个问题：血缘太长时，容错重算没有上
 这时 checkpoint 要做两件事：
 
 ```text
-1. 把当前 RDD 的每个分区写到可靠存储
+1. 把当前 RDD 的每个分区写到一个可重新读取的位置
 2. 让这个 RDD 不再向前暴露父依赖
 ```
 
-mini-Spark 里的实现是本地临时文件：
+真实 Spark 通常会把 checkpoint 写到 HDFS 这类可靠存储。mini-Spark 使用本地临时目录作为 checkpoint 位置。
+这里的 checkpoint 是立即执行的 driver 端操作，不经过调度器，也不覆盖完整分布式 checkpoint 语义。
+但它足够让我们看清 checkpoint 的两个动作：先物化分区，再切断血缘。
 
 ```java
 public final void checkpoint() {
@@ -353,6 +363,13 @@ checkpoint 不只是“下次从文件读”。
 
 它还要让调度器看见：这个 RDD 已经没有父依赖了。
 
+可以把两层职责分开记：
+
+```text
+iterator()      决定分区数据从哪儿读
+dependencies()  决定调度器还能不能继续向上找
+```
+
 第 7 章的 `DAGScheduler` 会沿着 `rdd.dependencies()` 回溯，遇到窄依赖继续走，遇到 shuffle 依赖切 Stage。
 
 如果 checkpoint 后 `dependencies()` 仍然返回父 RDD，调度器还是会继续向上追。那就没有真正切断血缘。
@@ -392,11 +409,7 @@ protected List<Dependency<?>> getDependenciesInternal() {
 
 但 checkpoint 之后，父类会统一返回空列表。
 
-这是一处小小的防御性设计。
-
-如果让每个子类自己判断 `checkpointed`，现在有 5 个子类，就有 5 个地方可能忘记写。以后再新增一种 RDD，又多一个遗漏点。
-
-把“不管哪种 RDD，checkpoint 后都没有父依赖”这个规则锁在父类里，正确性只写一次。
+这样写是为了把“checkpoint 后没有父依赖”这条规则收口到父类里，避免每个子类都重复判断一次。
 
 ## 10.7 跑一遍 checkpoint
 
@@ -461,15 +474,13 @@ checkpoint 把分区结果写到磁盘，并让 `dependencies()` 返回空列表
 RDD.iterator(partition)
 ```
 
-前几章我们一直让所有父子 RDD 通过它读取分区。到了第 10 章，这个统一入口终于发挥作用：
+前几章我们一直让所有父子 RDD 通过它读取分区。到了第 10 章，这个统一入口终于把两种短路都接住了：
 
 ```text
 checkpoint 命中 -> 读磁盘文件
 cache 命中      -> 读内存列表
 都没命中        -> compute(partition)
 ```
-
-这就是一个好的抽象带来的回报。
 
 前面章节不是在堆功能，而是在一步一步给后面的机制留位置。
 
