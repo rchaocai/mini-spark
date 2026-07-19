@@ -31,5 +31,6 @@
     <module>ch07-stage-dag</module>
     <module>ch08-fault-tolerance</module>
     <module>ch09-network-rpc</module>
+    <module>ch10-cache-checkpoint</module>
   </modules>
 </project>
