@@ -60,6 +60,21 @@ final class CacheCheckpointTest {
         }
     }
 
+    @Test
+    void cacheReducesRepeatedTrainingPassesOverSameSource() {
+        try (SparkContext sc = new SparkContext(3)) {
+            List<Sample> samples = samples();
+
+            RDD<Sample> plainSource = sc.parallelize(samples, 3);
+            assertEquals(List.of(3, 3, 3),
+                    runTrainingEpochCounts(plainSource, samples, false));
+
+            RDD<Sample> cachedSource = sc.parallelize(samples, 3);
+            assertEquals(List.of(3, 0, 0),
+                    runTrainingEpochCounts(cachedSource, samples, true));
+        }
+    }
+
     private static List<Integer> input() {
         return List.of(1, 2, 3, 4, 5, 6, 7, 8, 9);
     }
@@ -84,5 +99,38 @@ final class CacheCheckpointTest {
         @SuppressWarnings("unchecked")
         RDD<Integer> result = (RDD<Integer>) current;
         return result;
+    }
+
+    private static List<Integer> runTrainingEpochCounts(
+            RDD<Sample> source,
+            List<Sample> samples,
+            boolean cacheSource) {
+        if (cacheSource) {
+            source.cache();
+        }
+
+        double weight = 0.0;
+        double learningRate = 0.1;
+        List<Integer> counts = new java.util.ArrayList<>();
+        for (int epoch = 0; epoch < 3; epoch++) {
+            source.resetComputeCount();
+            double currentWeight = weight;
+            double gradient = source
+                    .map(sample -> (currentWeight * sample.x() - sample.y()) * sample.x())
+                    .reduce(Double::sum);
+            weight -= learningRate * gradient / samples.size();
+            counts.add(source.getComputeCount());
+        }
+        return List.copyOf(counts);
+    }
+
+    private static List<Sample> samples() {
+        return List.of(
+                new Sample(1.0, 2.0),
+                new Sample(2.0, 4.0),
+                new Sample(3.0, 6.0));
+    }
+
+    private record Sample(double x, double y) {
     }
 }

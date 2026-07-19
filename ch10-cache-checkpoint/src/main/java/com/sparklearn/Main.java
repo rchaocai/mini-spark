@@ -1,6 +1,7 @@
 package com.sparklearn;
 
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Cache 与 checkpoint 的演示入口。
@@ -63,6 +64,8 @@ public final class Main {
         List<Integer> second = chain.collect();
         System.out.println("第二次 collect，命中缓存: " + second);
         printComputeCount(source, cachedPoint, chain);
+
+        runToyTrainingDemo(sc);
     }
 
     private static void runWithCheckpoint(
@@ -127,5 +130,55 @@ public final class Main {
                 source.getComputeCount(),
                 middle.getComputeCount(),
                 last.getComputeCount());
+    }
+
+    private static void runToyTrainingDemo(SparkContext sc) {
+        System.out.println();
+        System.out.println("小例子: 一维梯度下降，看看同一批训练数据会不会被反复读");
+
+        List<Sample> samples = trainingSamples();
+        runToyTrainingCase(sc, samples, false);
+        runToyTrainingCase(sc, samples, true);
+    }
+
+    private static void runToyTrainingCase(
+            SparkContext sc,
+            List<Sample> samples,
+            boolean cacheSource) {
+        String title = cacheSource ? "cache 训练数据" : "不缓存训练数据";
+        System.out.println(title + ":");
+
+        RDD<Sample> source = sc.parallelize(samples, 3);
+        if (cacheSource) {
+            source.cache();
+        }
+
+        double weight = 0.0;
+        double learningRate = 0.1;
+        for (int epoch = 1; epoch <= 3; epoch++) {
+            source.resetComputeCount();
+            double currentWeight = weight;
+            double gradient = source
+                    .map(sample -> (currentWeight * sample.x() - sample.y()) * sample.x())
+                    .reduce(Double::sum);
+            weight -= learningRate * gradient / samples.size();
+            System.out.printf(
+                    Locale.ROOT,
+                    "  第 %d 轮: w=%.4f, gradient=%.4f, source.compute=%d%n",
+                    epoch,
+                    weight,
+                    gradient,
+                    source.getComputeCount());
+        }
+    }
+
+    private static List<Sample> trainingSamples() {
+        return List.of(
+                new Sample(1.0, 2.0),
+                new Sample(2.0, 4.0),
+                new Sample(3.0, 6.0));
+    }
+
+    private record Sample(double x, double y) {
     }
 }
