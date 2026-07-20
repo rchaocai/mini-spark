@@ -1,6 +1,7 @@
 package com.sparklearn;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
@@ -41,10 +42,12 @@ final class CacheCheckpointTest {
             assertEquals(1, checkpointPoint.dependencies().size());
             checkpointPoint.checkpoint();
 
-            assertTrue(checkpointPoint.isCheckpointed());
-            assertEquals(0, checkpointPoint.dependencies().size());
+            assertFalse(checkpointPoint.isCheckpointed());
+            assertEquals(1, checkpointPoint.dependencies().size());
             assertEquals(List.of(48, 54, 60, 66, 72, 78, 84),
                     checkpointPoint.collect());
+            assertTrue(checkpointPoint.isCheckpointed());
+            assertEquals(0, checkpointPoint.dependencies().size());
 
             source.resetComputeCount();
             checkpointPoint.resetComputeCount();

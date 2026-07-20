@@ -81,7 +81,14 @@ public final class Main {
         System.out.println("checkpoint 前依赖数: "
                 + checkpointPoint.dependencies().size());
         checkpointPoint.checkpoint();
-        System.out.println("checkpoint 后依赖数: "
+        System.out.println("checkpoint 请求后依赖数: "
+                + checkpointPoint.dependencies().size());
+        System.out.println("isCheckpointed: "
+                + checkpointPoint.isCheckpointed());
+
+        System.out.println("触发 checkpoint 的 collect: "
+                + checkpointPoint.collect());
+        System.out.println("checkpoint 物化后依赖数: "
                 + checkpointPoint.dependencies().size());
         System.out.println("isCheckpointed: "
                 + checkpointPoint.isCheckpointed());

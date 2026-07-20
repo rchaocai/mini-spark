@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -29,9 +30,11 @@ public abstract class RDD<T> implements Serializable {
 
     private final transient SparkContext sparkContext;
     private boolean shouldCache;
+    private boolean checkpointRequested;
     private boolean checkpointed;
     private File checkpointDir;
     private final Map<Integer, List<T>> cache = new ConcurrentHashMap<>();
+    private final Set<Integer> checkpointedPartitions = ConcurrentHashMap.newKeySet();
     private final AtomicInteger computeCount = new AtomicInteger();
 
     protected RDD(SparkContext sparkContext) {
@@ -82,20 +85,13 @@ public abstract class RDD<T> implements Serializable {
     }
 
     /**
-     * 把所有分区物化到本地磁盘，再切断当前 RDD 的父依赖。
+     * 标记当前 RDD 需要 checkpoint。
+     *
+     * <p>checkpoint 和 cache 一样是惰性的。这里只记录意图，不会立刻计算分区。
+     * 真正写 checkpoint 文件的时机，是后续 action 触发 iterator(partition) 之后。
      */
     public final void checkpoint() {
-        try {
-            File dir = Files.createTempDirectory("spark-checkpoint-").toFile();
-            for (Partition partition : partitions()) {
-                List<T> values = materialize(iterator(partition));
-                writeCheckpointFile(dir, partition, values);
-            }
-            checkpointDir = dir;
-            checkpointed = true;
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
+        checkpointRequested = true;
     }
 
     public final boolean isCheckpointed() {
@@ -118,6 +114,13 @@ public abstract class RDD<T> implements Serializable {
         if (checkpointed) {
             return readCheckpointFile(partition);
         }
+        if (checkpointRequested) {
+            return checkpointPartition(partition);
+        }
+        return iteratorWithoutCheckpoint(partition);
+    }
+
+    private Iterator<T> iteratorWithoutCheckpoint(Partition partition) {
         if (!shouldCache) {
             return computeTracked(partition);
         }
@@ -130,6 +133,37 @@ public abstract class RDD<T> implements Serializable {
         List<T> computed = materialize(computeTracked(partition));
         cache.put(partition.index(), computed);
         return new ArrayList<>(computed).iterator();
+    }
+
+    private Iterator<T> checkpointPartition(Partition partition) {
+        File dir = ensureCheckpointDir();
+        File file = checkpointFile(dir, partition);
+        if (file.exists()) {
+            return readCheckpointFile(partition);
+        }
+        List<T> values = materialize(iteratorWithoutCheckpoint(partition));
+        writeCheckpointFile(dir, partition, values);
+        markCheckpointPartitionComplete(partition);
+        return new ArrayList<>(values).iterator();
+    }
+
+    private synchronized File ensureCheckpointDir() {
+        if (checkpointDir != null) {
+            return checkpointDir;
+        }
+        try {
+            checkpointDir = Files.createTempDirectory("spark-checkpoint-").toFile();
+            return checkpointDir;
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private synchronized void markCheckpointPartitionComplete(Partition partition) {
+        checkpointedPartitions.add(partition.index());
+        if (checkpointedPartitions.size() == partitions().size()) {
+            checkpointed = true;
+        }
     }
 
     /**
