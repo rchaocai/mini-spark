@@ -36,6 +36,8 @@ public final class Main {
         System.out.println("第一次 collect: " + first);
         printComputeCount(source, cachedPoint, chain);
 
+        source.resetComputeCount();
+        cachedPoint.resetComputeCount();
         chain.resetComputeCount();
         List<Integer> second = chain.collect();
         System.out.println("第二次 collect: " + second);
