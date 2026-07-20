@@ -153,9 +153,9 @@ private final AtomicInteger computeCount = new AtomicInteger();
 `computeCount` 不是 Spark 的生产功能，只是本章 demo 用来观察“真正调用了几次 compute”。
 它统计的是 `compute()` 被调用的次数，不是元素处理次数，也不是 action 次数。
 
-同一个 `RDD` 类里还有 checkpoint 需要的 `checkpointed` 和 `checkpointDir`。它们暂时先放在一边；这一节只看 cache。等看到完整的 `iterator()` 时，你会发现 checkpoint 的优先级排在 cache 前面。
+同一个 `RDD` 类里还有 checkpoint 需要的 `checkpointed` 和 `checkpointDir`。这一节主要介绍cache，checkpoint 会在 10.5 节单独展开。
 
-`cache()` 本身很短：
+`cache()` 只记录缓存意图，不负责计算分区：
 
 ```java
 public final RDD<T> cache() {
@@ -164,15 +164,9 @@ public final RDD<T> cache() {
 }
 ```
 
-注意，它没有计算任何分区。
+调用 `rdd.cache()` 时，框架只是记下“以后如果真的算到这个 RDD，就把结果留下来”。这一步不会读取父 RDD，也不会生成任何分区结果。
 
-这就是惰性。
-
-调用 `rdd.cache()` 的时候，你只是告诉框架：“以后如果真的算到了这个 RDD，请把结果留下来。”
-
-什么时候真正填缓存？
-
-等 action 触发 `iterator(partition)`。
+真正填充缓存的时机，是 action 触发 `iterator(partition)` 之后：
 
 ```java
 public final Iterator<T> iterator(Partition partition) {
@@ -195,15 +189,24 @@ public final Iterator<T> iterator(Partition partition) {
 }
 ```
 
-这段代码的顺序很重要。
+先把完整顺序摆出来：
 
 第一层先看 checkpoint。一个 RDD 如果已经 checkpoint，就说明它的数据已经物化到文件里，读取时应该直接读文件，而不是再去考虑内存 cache。
 
-第二层才看 cache。没有开 cache 时，和前几章一样，直接 `computeTracked(partition)`。
+第二层才看 cache。这里先讲 cache 分支。没有开 cache 时，和前几章一样，回到原来的 `compute(partition)` 路径。
+
+代码里多包了一层 `computeTracked(...)`，只是为了给本章示例统计 compute 次数：
+
+```java
+private Iterator<T> computeTracked(Partition partition) {
+    computeCount.incrementAndGet();
+    return compute(partition);
+}
+```
 
 开了 cache 时，先用分区编号查 `cache`。命中了，就从内存里的列表返回迭代器。
 
-没有命中，才真的调用 `computeTracked(partition)`。算完以后把迭代器里的元素收集成 `List`，放进缓存，再返回。
+没有命中，才回到 `compute(partition)` 路径。算完以后把迭代器里的元素收集成 `List`，放进缓存，再返回。
 
 为什么要把迭代器收集成 `List`？
 
