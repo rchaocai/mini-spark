@@ -106,7 +106,7 @@ public final class SparkSourceMapDemo {
 
             new Entry("Checkpoint（切断血缘）", 10,
                     "RDD",
-                    "checkpoint() → 物化分区后 dependencies() 返回空",
+                    "checkpoint() → 物化后 dependencies() 指向 CheckpointRDD",
                     "（0.5 无；v0.7.0 起）rdd/CheckpointRDD.scala + RDD.scala",
                     "def checkpoint()；final def dependencies 改指向 CheckpointRDD"),
 

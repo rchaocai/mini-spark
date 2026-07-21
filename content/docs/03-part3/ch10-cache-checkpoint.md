@@ -463,11 +463,11 @@ checkpoint 前依赖数: 1
 checkpoint 请求后依赖数: 1
 isCheckpointed: false
 触发 checkpoint 的 collect: [48, 54, 60, 66, 72, 78, 84]
-checkpoint 物化后依赖数: 0
+checkpoint 物化后依赖数: 1
 isCheckpointed: true
 ```
 
-输出的关键，是中间那次跳变。调用 `checkpoint()` 之后，依赖数仍然是 1，`isCheckpointed` 仍然是 false；等到 `collect()` 跑完，依赖数才掉到 0，`isCheckpointed` 才变成 true。这说明 `checkpoint()` 这一步什么也没真正做，只是登记了一个请求；真正把分区写进文件、把血缘切断的，是后面那次 `collect()`。
+输出的关键，是最后那一步。调用 `checkpoint()` 之后，依赖数仍然是 1，`isCheckpointed` 仍然是 false——什么都没真正发生；等到 `collect()` 跑完，`isCheckpointed` 才变成 true。依赖数看着还是 1，但指向已经变了：原来那个依赖指向父 RDD，现在换成了一个专职读 checkpoint 文件的 `CheckpointRDD`（马上就讲）。这说明 `checkpoint()` 这一步只登记了一个请求；真正把分区写进文件、把血缘切断的，是后面那次 `collect()`。
 
 代码后半段还会从 checkpoint 点继续往下算一条 `downstream` 链，它用来验证血缘是不是真的被切断了，留到本节后面再看。下面先把这两步拆开。
 
@@ -491,7 +491,7 @@ private final Set<Integer> checkpointedPartitions =
 
 `checkpointRequested` 表示已经登记 checkpoint 请求。`checkpointedPartitions` 记录哪些分区已经写入文件。只有所有分区都写完，`checkpointed` 才会变成 true。
 
-此时 `checkpointPoint` 还没有数据文件，`dependencies()` 也仍然能看到父 RDD。下一次 action 经过这个 RDD 时，走的还是 10.2 贴过的那个 `iterator()`——它的前两个分支就是为 checkpoint 留的：`checkpointed` 为真就直接读 checkpoint 文件，`checkpointRequested` 为真就进入物化。只有两者都不满足，才回到 cache 那条 `iteratorWithoutCheckpoint` 路。
+此时 `checkpointPoint` 还没有数据文件，`dependencies()` 也仍然能看到父 RDD。下一次 action 经过这个 RDD 时，走的还是 10.2 贴过的那个 `iterator()`——它的前两个分支就是为 checkpoint 留的：`checkpointed` 为真就交给 `CheckpointRDD` 读 checkpoint 文件，`checkpointRequested` 为真就进入物化。只有两者都不满足，才回到 cache 那条 `iteratorWithoutCheckpoint` 路。
 
 物化具体怎么做？进入 `checkpointPartition(partition)`：
 
@@ -511,18 +511,14 @@ private Iterator<T> checkpointPartition(Partition partition) {
 
 这一段就是 checkpoint 的物化过程：当前分区先按原来的读取路径拿到数据，再写入 checkpoint 文件。这个读取路径可能沿血缘计算，也可能命中已有 cache。`collect()` 会访问所有分区，所以它结束后，所有分区都已经写好。
 
-等最后一个分区写完，`markCheckpointPartitionComplete(partition)` 会把这个 RDD 标记为 checkpointed。此后它发生两个变化：
+等最后一个分区写完，`markCheckpointPartitionComplete(partition)` 会把这个 RDD 标记为 checkpointed，并挂上一个 `CheckpointRDD`。此后它发生两个变化：
 
-1. `iterator(partition)` 不再沿父血缘往上算，而是直接读 checkpoint 文件。
-2. `dependencies()` 返回空列表，调度器再往上找时，会把这里当成血缘终点。
+1. `iterator(partition)` 不再沿父血缘往上算，而是交给 `CheckpointRDD` 去读 checkpoint 文件。
+2. `dependencies()` 不再返回原来的父 RDD，而是返回一个指向 `CheckpointRDD` 的依赖。
 
-这两个变化合起来，等于把这个 RDD 原地变成了一个 source RDD。
+`CheckpointRDD` 是个叶子：它自己 `dependencies()` 返回空，`compute()` 直接读 checkpoint 文件。所以调度器沿着依赖追过来，撞到 `CheckpointRDD` 就停——原来的父血缘被绕开了。读取也一样，数据从 `CheckpointRDD` 的文件里来，不再调原来那条链的 `compute()`。
 
-source RDD 之所以是「源头」，靠的就是这两条：没有父依赖、自己能产出分区数据。`ListRDD` 就是这样——`dependencies()` 返回空，`compute()` 直接读内存列表里的数据。
-
-物化后的 RDD 这两条都满足：`dependencies()` 被改成返回空，读取时直接读 checkpoint 文件。所以对下游 RDD 和调度器而言，它和一个 `ListRDD` 没有本质区别，都是血缘的终点。
-
-差别只在数据从哪儿来：source RDD 读的是外部输入（用户传进来的列表、磁盘上的原始文件），checkpoint RDD 读的是它自己之前算过、再写下来的结果。但这不影响「无父依赖、自产数据」这个身份。
+这两点合起来，等于把这个 RDD 的数据源换成了一个 `CheckpointRDD`：对下游 RDD 和调度器而言，它和一个 `ListRDD` 没有本质区别——都依赖一个能自产数据的叶子，血缘都在这里终止。差别只在数据从哪儿来：`ListRDD` 读外部输入（用户传进来的列表），`CheckpointRDD` 读它自己之前算过、再写下来的结果。
 
 这一点可以用示例后半段的 `downstream` 验证。前面 `runWithCheckpoint` 的代码里，`checkpointPoint` 物化之后还从它往下建了一条 `downstream` 链再 `collect`，输出是：
 
@@ -532,7 +528,7 @@ checkpoint 后继续往下计算: [480, 540, 600, 660, 720, 780, 840]
 checkpoint 点 compute 次数: 0
 ```
 
-源头是 0，说明 `downstream` 算的时候没有回溯到 `ListRDD`；checkpoint 点也是 0，说明它连自己的 `compute()` 都没调，直接从 checkpoint 文件读。依赖数变 0 是调度器看到的景象，`compute` 次数为 0 是实际执行的结果——两点合起来，血缘是真的被切断了，下游不再回头。
+源头是 0，说明 `downstream` 算的时候没有回溯到 `ListRDD`；checkpoint 点也是 0，说明它连自己的 `compute()` 都没调，数据全从 `CheckpointRDD` 的文件里读。依赖改指向 `CheckpointRDD` 是调度器看到的景象，`compute` 次数为 0 是实际执行的结果——两点合起来，血缘是真的被切断了，下游不再回头。
 
 把请求登记和物化分开，是这个机制的关键。`checkpoint()` 通常写在构建 RDD 的代码里，那一刻还没有任何 action，分区结果还没算出来。若要求它在调用那一刻就把数据写进文件，框架只能自己在背后触发一次 action，把分区算出来再写，凭空多一轮计算。所以请求只负责登记，物化等下一个 action 第一次访问这个 RDD 时再发生——它顺着用户已经要做的计算走，不另起一趟。
 
@@ -540,7 +536,7 @@ checkpoint 点 compute 次数: 0
 
 ## 10.6 dependencies 为什么变成 final
 
-上一节验证了 checkpoint 真的切断了血缘：依赖数变 0、下游的 `compute` 次数也变 0。这两件事是怎么在代码上保证的？
+上一节验证了 checkpoint 真的切断了血缘：依赖改指向 `CheckpointRDD`、下游的 `compute` 次数也变 0。这两件事是怎么在代码上保证的？
 
 checkpoint 其实动了两个入口，职责要分开看：
 
@@ -553,7 +549,7 @@ dependencies()  决定调度器还能不能继续向上找
 
 如果 checkpoint 物化后 `dependencies()` 仍然返回父 RDD，调度器还是会继续向上追。那就没有真正切断血缘。
 
-这条规则不能交给每个子类自己处理：否则每个 `MapPartitionsRDD`、`ListRDD` 都得在自己的依赖方法开头判断一遍「我是不是已经 checkpoint 了？是的话就不返回父 RDD」，每个子类都要抄一遍这段判断，只要有一个漏掉，它的 checkpoint 就形同虚设——调度器照样能从它追到父 RDD，血缘根本没断。
+这条规则不能交给每个子类自己处理：否则每个 `MapPartitionsRDD`、`ListRDD` 都得在自己的依赖方法开头判断一遍「我是不是已经 checkpoint 了？是的话就把依赖换成 `CheckpointRDD`」，每个子类都要抄一遍这段判断，只要有一个漏掉，它的 checkpoint 就形同虚设——调度器照样能从它追到父 RDD，血缘根本没断。
 
 所以本章把这条判断收到父类 `RDD` 的 `dependencies()` 里，并设成 `final`，子类不能再重写。父类长这样：
 
@@ -563,7 +559,7 @@ public abstract class RDD<T> {
 
     public final List<Dependency<?>> dependencies() {
         if (checkpointed) {
-            return List.of();
+            return List.of(new OneToOneDependency<>(checkpointRDD));
         }
         return getDependenciesInternal();
     }
@@ -573,7 +569,7 @@ public abstract class RDD<T> {
 }
 ```
 
-`dependencies()` 是 `final`，里面只做一件事——checkpoint 物化了就返回空，否则委托给 `getDependenciesInternal()`。子类碰不到这段判断，只能实现 `getDependenciesInternal()`，老老实实交代自己的父依赖：
+`dependencies()` 是 `final`，里面只做一件事——checkpoint 物化了就返回一个指向 `CheckpointRDD` 的依赖，否则委托给 `getDependenciesInternal()`。子类碰不到这段判断，只能实现 `getDependenciesInternal()`，老老实实交代自己的父依赖：
 
 ```java
 // MapPartitionsRDD：由 map 产生，有一个父 RDD
@@ -587,7 +583,7 @@ protected List<Dependency<?>> getDependenciesInternal() {
 }
 ```
 
-不管子类原本有没有父依赖，只要 checkpoint 物化，父类的 `dependencies()` 都会拦在前面返回空。前面看到依赖数从 1 变成 0，就是这个 `final` 方法生效的结果。
+不管子类原本有没有父依赖，只要 checkpoint 物化，父类的 `dependencies()` 都会拦在前面，把依赖换成 `CheckpointRDD`。前面看到依赖从指向原父 RDD 变成指向 `CheckpointRDD`，就是这个 `final` 方法生效的结果。
 
 同一个思路也适用于 cache。前面 10.2 讲过，cache 的命中和填充都发生在 `iterator()` 里，而 `iterator()` 本来就是 `final`——子类不能重写它，只能重写 `compute(partition)`，告诉父类「这个分区原本该怎么算」。至于「命中缓存就直接返回」「没命中就算完存起来」，由父类的 `iterator()` 统一把关。
 
@@ -603,7 +599,7 @@ cache 和 checkpoint 都是在控制这个成本。
 
 cache 把分区结果留在内存里。它快，适合反复使用的数据，比如逻辑回归每轮都要读的训练数据。但它不切断血缘。缓存丢了，还能从父 RDD 重算。
 
-checkpoint 把分区结果写到磁盘，并让 `dependencies()` 返回空列表。它慢一些，但给容错重算设了上限。PageRank 里不断变长的 `ranks` 就是典型对象。
+checkpoint 把分区结果写到磁盘，并把 `dependencies()` 换成指向一个专职读文件的 `CheckpointRDD`——原血缘到此为止。它慢一些，但给容错重算设了上限。PageRank 里不断变长的 `ranks` 就是典型对象。
 
 本章的关键改动集中在一个方法上：
 

@@ -47,7 +47,8 @@ final class CacheCheckpointTest {
             assertEquals(List.of(48, 54, 60, 66, 72, 78, 84),
                     checkpointPoint.collect());
             assertTrue(checkpointPoint.isCheckpointed());
-            assertEquals(0, checkpointPoint.dependencies().size());
+            assertEquals(1, checkpointPoint.dependencies().size());
+            assertTrue(checkpointPoint.dependencies().get(0).rdd() instanceof CheckpointRDD);
 
             source.resetComputeCount();
             checkpointPoint.resetComputeCount();

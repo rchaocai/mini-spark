@@ -1,12 +1,9 @@
 package com.sparklearn;
 
-import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
 import java.io.UncheckedIOException;
@@ -33,6 +30,7 @@ public abstract class RDD<T> implements Serializable {
     private boolean checkpointRequested;
     private boolean checkpointed;
     private File checkpointDir;
+    private RDD<T> checkpointRDD;
     private final Map<Integer, List<T>> cache = new ConcurrentHashMap<>();
     private final Set<Integer> checkpointedPartitions = ConcurrentHashMap.newKeySet();
     private final AtomicInteger computeCount = new AtomicInteger();
@@ -56,7 +54,7 @@ public abstract class RDD<T> implements Serializable {
      */
     public final List<Dependency<?>> dependencies() {
         if (checkpointed) {
-            return List.of();
+            return List.of(new OneToOneDependency<>(checkpointRDD));
         }
         return getDependenciesInternal();
     }
@@ -112,7 +110,7 @@ public abstract class RDD<T> implements Serializable {
     public final Iterator<T> iterator(Partition partition) {
         Objects.requireNonNull(partition, "partition");
         if (checkpointed) {
-            return readCheckpointFile(partition);
+            return checkpointRDD.iterator(partition);
         }
         if (checkpointRequested) {
             return checkpointPartition(partition);
@@ -139,7 +137,8 @@ public abstract class RDD<T> implements Serializable {
         File dir = ensureCheckpointDir();
         File file = checkpointFile(dir, partition);
         if (file.exists()) {
-            return readCheckpointFile(partition);
+            return new CheckpointRDD<T>(sparkContext(), dir, partitions().size())
+                    .compute(partition);
         }
         List<T> values = materialize(iteratorWithoutCheckpoint(partition));
         writeCheckpointFile(dir, partition, values);
@@ -163,6 +162,8 @@ public abstract class RDD<T> implements Serializable {
         checkpointedPartitions.add(partition.index());
         if (checkpointedPartitions.size() == partitions().size()) {
             checkpointed = true;
+            checkpointRDD = new CheckpointRDD<>(
+                    sparkContext(), checkpointDir, partitions().size());
         }
     }
 
@@ -335,21 +336,6 @@ public abstract class RDD<T> implements Serializable {
         List<T> values = new ArrayList<>();
         iterator.forEachRemaining(values::add);
         return values;
-    }
-
-    @SuppressWarnings("unchecked")
-    private Iterator<T> readCheckpointFile(Partition partition) {
-        if (checkpointDir == null) {
-            throw new IllegalStateException("checkpointDir is not available");
-        }
-        File file = checkpointFile(checkpointDir, partition);
-        try (ObjectInputStream in = new ObjectInputStream(
-                new BufferedInputStream(new FileInputStream(file)))) {
-            List<T> values = (List<T>) in.readObject();
-            return values.iterator();
-        } catch (IOException | ClassNotFoundException e) {
-            throw new RuntimeException("读取 checkpoint 文件失败: " + file, e);
-        }
     }
 
     private void writeCheckpointFile(
