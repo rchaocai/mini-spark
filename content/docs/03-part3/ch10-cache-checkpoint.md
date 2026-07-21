@@ -26,7 +26,7 @@ summary: "第 8 章证明了血缘可以重算，第 10 章继续追问：如果
 
 这一章先看一个最容易暴露问题的场景：一条很长的血缘。
 
-这条链横向展开后，cache 命中的位置会更清楚：
+这条链横向展开后，会被两次 `collect` 反复访问：
 
 ```mermaid
 flowchart LR
@@ -35,16 +35,15 @@ flowchart LR
     C[filter]
     D["..."]
     E[map]
-    F[(cache 点)]
-    G[collect 第 1 次]
-    H[collect 第 2 次]
+    F[collect 第 1 次]
+    G[collect 第 2 次]
 
-    A --> B --> C --> D --> E --> F
-    F --> G
-    F --> H
+    A --> B --> C --> D --> E
+    E --> F
+    E --> G
 ```
 
-第 1.5 节里说的逻辑回归和 PageRank，本质上也是同一批数据要反复读。把问题收缩成一条 RDD 链之后，可以先看清一个核心动作：只要 cache 点命中，后面的 action 就不必再向前追。
+第 1.5 节里说的逻辑回归和 PageRank，本质上也是同一批数据要反复读。把问题收缩成一条 RDD 链之后，可以先看清一个核心动作：只要中间某个 RDD 被缓存住，后面的 action 就不必再向前追。
 
 如果没有任何缓存，每一次 `collect()` 都会从 `ListRDD` 开始，把这么多步重新跑一遍。
 
@@ -417,9 +416,7 @@ cache 训练数据:
 
 ## 10.5 checkpoint：把血缘切断
 
-cache 解决的是“反复读同一批数据太贵”的问题，但它不改变数据的来源。缓存命中时，计算可以绕开上游；缓存一旦丢了，框架仍然可以沿着原来的血缘重新算回来。也就是说，cache 更像一条近路，路还在，只是平时不用每次都走。
-
-checkpoint 处理的是另一类问题：血缘太长时，重算的代价会一路累积，最后大到难以接受。拿 PageRank（一种给网页算权重的迭代算法）来说，`links` 是网页之间的链接图，固定不变，适合反复缓存；`ranks` 是每个网页的当前权重，每一轮都由上一轮的 `ranks` 重新算出来。如果第 20 轮某个分区丢了，还要从第 1 轮一路重算到第 20 轮，成本就太高了。
+前面 cache 控制的是“反复读太贵”，但它不切断血缘——缓存丢了，还能沿血缘重算回来。checkpoint 要处理的是血缘太长的情况：重算的代价会一路累积，最后大到难以接受。拿 PageRank（一种给网页算权重的迭代算法）来说，`links` 是网页之间的链接图，固定不变，适合反复缓存；`ranks` 是每个网页的当前权重，每一轮都由上一轮的 `ranks` 重新算出来。如果第 20 轮某个分区丢了，还要从第 1 轮一路重算到第 20 轮，成本就太高了。
 
 所以 checkpoint 要做两件事：
 
@@ -494,22 +491,9 @@ private final Set<Integer> checkpointedPartitions =
 
 `checkpointRequested` 表示已经登记 checkpoint 请求。`checkpointedPartitions` 记录哪些分区已经写入文件。只有所有分区都写完，`checkpointed` 才会变成 true。
 
-此时 `checkpointPoint` 还没有数据文件，`dependencies()` 也仍然能看到父 RDD。下一次 action 经过这个 RDD 时，`iterator(partition)` 才会起作用：
+此时 `checkpointPoint` 还没有数据文件，`dependencies()` 也仍然能看到父 RDD。下一次 action 经过这个 RDD 时，走的还是 10.2 贴过的那个 `iterator()`——它的前两个分支就是为 checkpoint 留的：`checkpointed` 为真就直接读 checkpoint 文件，`checkpointRequested` 为真就进入物化。只有两者都不满足，才回到 cache 那条 `iteratorWithoutCheckpoint` 路。
 
-```java
-public final Iterator<T> iterator(Partition partition) {
-    Objects.requireNonNull(partition, "partition");
-    if (checkpointed) {
-        return readCheckpointFile(partition);
-    }
-    if (checkpointRequested) {
-        return checkpointPartition(partition);
-    }
-    return iteratorWithoutCheckpoint(partition);
-}
-```
-
-如果 checkpoint 已经完成，就直接读文件。如果只是请求了 checkpoint，还没有物化，就进入 `checkpointPartition(partition)`：
+物化具体怎么做？进入 `checkpointPartition(partition)`：
 
 ```java
 private Iterator<T> checkpointPartition(Partition partition) {
