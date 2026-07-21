@@ -119,7 +119,7 @@ final class CacheCheckpointTest {
             source.resetComputeCount();
             double currentWeight = weight;
             double gradient = source
-                    .map(sample -> (currentWeight * sample.x() - sample.y()) * sample.x())
+                    .map(sample -> (sigmoid(currentWeight * sample.x()) - sample.y()) * sample.x())
                     .reduce(Double::sum);
             weight -= learningRate * gradient / samples.size();
             counts.add(source.getComputeCount());
@@ -129,11 +129,18 @@ final class CacheCheckpointTest {
 
     private static List<Sample> samples() {
         return List.of(
-                new Sample(1.0, 2.0),
-                new Sample(2.0, 4.0),
-                new Sample(3.0, 6.0));
+                new Sample(0.5, 0.0),
+                new Sample(1.0, 0.0),
+                new Sample(2.0, 0.0),
+                new Sample(3.0, 1.0),
+                new Sample(4.0, 1.0),
+                new Sample(5.0, 1.0));
     }
 
     private record Sample(double x, double y) {
+    }
+
+    private static double sigmoid(double z) {
+        return 1.0 / (1.0 + Math.exp(-z));
     }
 }

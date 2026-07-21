@@ -80,20 +80,14 @@ public final class Main {
         RDD<Integer> chain = buildLongLineage(source);
         RDD<Integer> checkpointPoint = traceUp(chain, 3);
 
-        System.out.println("checkpoint 前依赖数: "
-                + checkpointPoint.dependencies().size());
+        System.out.println("checkpoint 前依赖数: " + checkpointPoint.dependencies().size());
         checkpointPoint.checkpoint();
-        System.out.println("checkpoint 请求后依赖数: "
-                + checkpointPoint.dependencies().size());
-        System.out.println("isCheckpointed: "
-                + checkpointPoint.isCheckpointed());
+        System.out.println("checkpoint 请求后依赖数: " + checkpointPoint.dependencies().size());
+        System.out.println("isCheckpointed: " + checkpointPoint.isCheckpointed());
 
-        System.out.println("触发 checkpoint 的 collect: "
-                + checkpointPoint.collect());
-        System.out.println("checkpoint 物化后依赖数: "
-                + checkpointPoint.dependencies().size());
-        System.out.println("isCheckpointed: "
-                + checkpointPoint.isCheckpointed());
+        System.out.println("触发 checkpoint 的 collect: " + checkpointPoint.collect());
+        System.out.println("checkpoint 物化后依赖数: " + checkpointPoint.dependencies().size());
+        System.out.println("isCheckpointed: " + checkpointPoint.isCheckpointed());
 
         source.resetComputeCount();
         checkpointPoint.resetComputeCount();
@@ -101,11 +95,9 @@ public final class Main {
         RDD<Integer> downstream = checkpointPoint
                 .map(value -> value * 10)
                 .filter(value -> value > 200);
-        System.out.println("checkpoint 后继续往下计算: "
-                + downstream.collect());
+        System.out.println("checkpoint 后继续往下计算: " + downstream.collect());
         System.out.println("源头 compute 次数: " + source.getComputeCount());
-        System.out.println("checkpoint 点 compute 次数: "
-                + checkpointPoint.getComputeCount());
+        System.out.println("checkpoint 点 compute 次数: " + checkpointPoint.getComputeCount());
     }
 
     private static RDD<Integer> buildLongLineage(RDD<Integer> source) {
@@ -143,7 +135,7 @@ public final class Main {
 
     private static void runToyTrainingDemo(SparkContext sc) {
         System.out.println();
-        System.out.println("小例子: 一维梯度下降，看看同一批训练数据会不会被反复读");
+        System.out.println("小例子: 一维逻辑回归，看看同一批训练数据会不会被反复读");
 
         List<Sample> samples = trainingSamples();
         runToyTrainingCase(sc, samples, false);
@@ -168,7 +160,7 @@ public final class Main {
             source.resetComputeCount();
             double currentWeight = weight;
             double gradient = source
-                    .map(sample -> (currentWeight * sample.x() - sample.y()) * sample.x())
+                    .map(sample -> (sigmoid(currentWeight * sample.x()) - sample.y()) * sample.x())
                     .reduce(Double::sum);
             weight -= learningRate * gradient / samples.size();
             System.out.printf(
@@ -183,11 +175,18 @@ public final class Main {
 
     private static List<Sample> trainingSamples() {
         return List.of(
-                new Sample(1.0, 2.0),
-                new Sample(2.0, 4.0),
-                new Sample(3.0, 6.0));
+                new Sample(0.5, 0.0),
+                new Sample(1.0, 0.0),
+                new Sample(2.0, 0.0),
+                new Sample(3.0, 1.0),
+                new Sample(4.0, 1.0),
+                new Sample(5.0, 1.0));
     }
 
     private record Sample(double x, double y) {
+    }
+
+    private static double sigmoid(double z) {
+        return 1.0 / (1.0 + Math.exp(-z));
     }
 }

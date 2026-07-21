@@ -14,15 +14,15 @@ summary: "第 8 章证明了血缘可以重算，第 10 章继续追问：如果
 >
 > 运行示例：`java -Dfile.encoding=UTF-8 -cp ch10-cache-checkpoint/target/classes com.sparklearn.Main`
 
-先抓住上一章留下的判断：血缘能重算，但重算不一定便宜。
+先从上一章留下的判断说起：血缘能重算，但重算不一定便宜。
 
 当一个 Task 失败时，调度器会重新提交它。Task 再沿着 RDD 血缘，从父 RDD 一层层算回来。只要源数据还在、函数还在、依赖还在，这个分区就能被重算出来。
 
-这句话是对的，但它还不完整。它只回答了“能不能重算”，没有回答“重算要花多少钱”。
+这句话是对的，但它还不完整。它只回答了“能不能重算”，没有回答“重算要花多大代价”。
 
 前一章已经把执行搬到另一个 JVM。到了那里，Task、RDD 血缘和用户函数都要先序列化，再穿过 Socket，再在 Executor 里反序列化。一次普通计算已经多了一层网络和序列化成本。
 
-本章代码继续使用本地调度器路径，把重点放回 `RDD.iterator(partition)` 这个读取入口。这样可以先看清 cache 和 checkpoint 插入到哪里；Executor 侧的分布式缓存放在后面的 Info 注释里对照现代 Spark 说明。
+本章代码继续使用本地调度器路径，把重点放回 `RDD.iterator(partition)` 这个读取入口。这样可以先看清 cache 和 checkpoint 插入到哪里；Executor 侧的分布式缓存放在后面的 Info 注释里，作为对照说明。
 
 这一章先看一个最容易暴露问题的场景：一条很长的血缘。
 
@@ -113,13 +113,13 @@ child.compute(partition)
 
 第 10 章的关键点不是“多了两个新接口”，而是入口没有变：所有分区读取仍然经过 `iterator()`。
 
-在本章这个 mini-Spark 项目里，cache 只要插在这里，就能让后续读取自动命中同一份缓存。
+在本章代码里，cache 只要插在这里，就能让后续读取自动命中同一份缓存。
 
 checkpoint 也会先借这个入口改掉“从哪里读数据”。同时，它还要让调度器看到“这个 RDD 已经没有父依赖了”。依赖边界放到 10.6 再拆。
 
-真实 Spark 的早期源码也是这个设计。`RDD.cache()` 只是设置一个 `shouldCache` 标记；真正读取分区时，`RDD.iterator(split)` 再决定是走缓存，还是调用 `compute(split)`。缓存的复杂实现放在 `CacheTracker.getOrCompute(...)` 后面，但插入点仍然是 `iterator()`。
+cache 不需要新开一条读取路径。`cache()` 只做一件事：把这个 RDD 标记成「以后算出来的分区要留下来」。真正决定命中还是重算，仍然发生在 `iterator(partition)` 这一层——命中就返回内存里的列表，没命中就继续调用 `compute(partition)`。
 
-mini-Spark 也沿用这个位置，把 CacheTracker 的职责收束到一个内存 Map 上。
+复杂实现可以藏在这层判断后面，比如用专门的缓存管理器去维护块、统计命中率、做淘汰策略；但插入点不变，所有读取都先过 `iterator()`。本章把缓存管理简化成一个内存 Map，职责不变。
 
 ## 10.2 cache：第一次算，第二次读
 
@@ -136,33 +136,44 @@ cache 的基本流程是：
   不再调用 compute(partition)
 ```
 
-先只看 cache 需要的状态，`RDD` 里有三个相关字段：
+先只看 cache 需要的状态。这些字段都挂在父类 `RDD` 上，和 checkpoint 的字段声明在同一块里：
 
 ```java
-private boolean shouldCache;
-private final Map<Integer, List<T>> cache = new ConcurrentHashMap<>();
-private final AtomicInteger computeCount = new AtomicInteger();
+public abstract class RDD<T> implements Serializable {
+
+    private final transient SparkContext sparkContext;
+    private boolean shouldCache;
+    private boolean checkpointRequested;
+    private boolean checkpointed;
+    private File checkpointDir;
+    private final Map<Integer, List<T>> cache = new ConcurrentHashMap<>();
+    private final Set<Integer> checkpointedPartitions = ConcurrentHashMap.newKeySet();
+    private final AtomicInteger computeCount = new AtomicInteger();
+
+    // 后面还有 partitions()、compute()、dependencies() 等方法
+}
 ```
+
+这一节只看 cache 的三个：`shouldCache`、`cache`、`computeCount`。
 
 `shouldCache` 表示这个 RDD 想缓存。
 
 `cache` 用分区编号做 key，保存这个分区已经算出来的元素列表。
 
-`computeCount` 不是 Spark 的生产功能，只是本章 demo 用来观察“真正调用了几次 compute”。
-它统计的是 `compute()` 被调用的次数，不是元素处理次数，也不是 action 次数。
+`computeCount` 不是框架的生产功能，只是本章 demo 用来观察“真正调用了几次 compute”。它统计的是 `compute()` 被调用的次数，不是元素处理次数，也不是 action 次数。
 
-同一个 `RDD` 类里还有 checkpoint 需要的 `checkpointRequested`、`checkpointed`、`checkpointDir` 和 `checkpointedPartitions`。这一节主要介绍 cache，checkpoint 会在 10.5 节单独展开。
+中间夹着的 `checkpointRequested`、`checkpointed`、`checkpointDir`、`checkpointedPartitions` 是 checkpoint 用的，这一节先不展开，10.5 再讲。
 
 > [!INFO]
 > **cache 保存在哪里？会不会丢？**
 >
 > 在本章代码里，cache 是 `RDD` 对象里的一个内存 `Map`。它只保存已经算出来的分区结果，不会把数据写到 checkpoint 文件，也不会切断血缘。
 >
-> 现代 Spark 里，同样的职责由 Executor 侧的 `BlockManager` 承担。`persist()` 默认先把分区结果放进内存块；如果缓存块丢失，下一次 action 仍会沿血缘重算，再把结果重新放回缓存。
+> 生产级实现里，同样的职责由 Executor 侧的 `BlockManager` 承担。`persist()` 默认先把分区结果放进内存块；如果缓存块丢失，下一次 action 仍会沿血缘重算，再把结果重新放回缓存。
 >
-> 这意味着缓存块属于具体 Executor。如果某个 Executor 被销毁，或者内存压力导致缓存块被清掉，那些分区的缓存就没了。下一次再需要这些分区时，Spark 不会报错，而是沿着 `A -> B -> C` 这样的血缘重新计算，再把新结果放回缓存。
+> 这意味着缓存块属于具体 Executor。如果某个 Executor 被销毁，或者内存压力导致缓存块被清掉，那些分区的缓存就没了。下一次再需要这些分区时，系统不会报错，而是沿着 `A -> B -> C` 这样的血缘重新计算，再把新结果放回缓存。
 >
-> 所以 cache 是“加速用的捷径”，不是新的数据源。需要更强的保留策略时，Spark 还可以选择 `MEMORY_AND_DISK`、`MEMORY_ONLY_2` 这类 storage level，但它们解决的是缓存保存策略，不改变 cache 不切断血缘这一点。
+> 所以 cache 是“加速用的捷径”，不是新的数据源。需要更强的保留策略时，系统还可以指定缓存怎么存——存内存还是磁盘、要不要多存一份副本（比如 `MEMORY_AND_DISK`、`MEMORY_ONLY_2` 这类 storage level）。它们调整的是缓存的保存方式，不改变 cache 不切断血缘这一点。
 
 `cache()` 只记录缓存意图，不负责计算分区：
 
@@ -278,7 +289,7 @@ RDD<Integer> chain = buildLongLineage(source);
 RDD<Integer> cachedPoint = traceUp(chain, 3);
 ```
 
-`source` 是源头 RDD，`chain` 是整条长血缘的末端，`cachedPoint` 是中间缓存点。输入被切成 3 个分区，所以一个 RDD 如果被完整计算一次，`compute` 次数通常就是 3。
+`source` 是源头 RDD，`chain` 是整条长血缘的末端，`cachedPoint` 是中间缓存点。输入被切成 3 个分区，一次完整计算会把这 3 个分区各算一遍，每个分区触发一次 `compute`，所以一个 RDD 被完整计算一次，`compute` 次数通常就是 3。
 
 先看不加 cache 的版本。两次 `collect()` 都要从 `source` 往后跑完整条链：
 
@@ -363,57 +374,105 @@ cache 不是越早越好，也不是越晚越好。
 
 迭代式机器学习就是这种复用模式的典型场景。
 
-第 1.5 节里的逻辑回归，就是这种模式最典型的缩影。训练过程可以收缩成一维梯度下降：
+第 1.5 节用逻辑回归举过例子：它一轮一轮地调参，每一轮都要把整份训练数据从头过一遍。这里把那个训练循环收到最简单的一维形式——一个特征 `x`、一个权重 `w`、标签 `y` 只有 0 或 1，用 `map` 算每条样本的梯度，用 `reduce` 汇总：
 
 ```mermaid
 flowchart LR
     S[(训练数据 RDD)]
-    M[map: 计算每条样本的梯度贡献]
+    M[map: 算每条样本的梯度]
     R[reduce: 汇总本轮梯度]
     U[更新参数 w]
 
     S --> M --> R --> U --> S
 ```
 
-每一轮都要从同一份训练数据里重新算梯度，所以 cache 的效果会体现在源 RDD 的计算次数上：不缓存时，源 RDD 每一轮都要重新算；缓存以后，第一轮把数据读进内存，后面的轮次直接复用。
+`map` 这一步就是逻辑回归的梯度公式（`sigmoid` 把 `w·x` 压成 0~1 的预测概率，再和标签 `y` 算差）：
 
-本章 `Main` 里就有这个小例子。用当前已经实现的 `map` 和 `reduce` 跑三轮训练，观察源 RDD 的 `compute` 次数：
-
-```text
-不缓存训练数据: source.compute = 3, 3, 3
-cache 训练数据: source.compute = 3, 0, 0
+```java
+double gradient = source
+        .map(sample -> (sigmoid(currentWeight * sample.x()) - sample.y()) * sample.x())
+        .reduce(Double::sum);
 ```
 
-两边的参数更新过程一样，差别只在训练数据是否被重复读取。
+这里要关注的不是公式本身，而是它读的数据：每一轮都从同一个 `source`（训练数据 RDD）里重新算梯度。这正好和 10.3 互补——10.3 是一条长血缘被多次 action 访问，cache 用来短路缓存点之前的上游；这里是同一批训练数据被多轮迭代反复读，cache 用来让第一轮之后各轮直接复用。
 
-逻辑回归的训练通常是一轮一轮更新参数。每一轮都要读同一份训练数据。如果没有 cache，10 轮训练就读 10 次数据。数据在 HDFS 上时，这意味着每轮都有磁盘 I/O 和网络 I/O。
+本章 `Main` 里就有这个小例子，跑三轮训练：
 
-把训练数据 RDD 缓存起来以后，第一轮把数据读进内存，后面的轮次直接读内存。
+```text
+不缓存训练数据:
+  第 1 轮: w=0.0708, gradient=-4.2500, source.compute=3
+  第 2 轮: w=0.1255, gradient=-3.2788, source.compute=3
+  第 3 轮: w=0.1681, gradient=-2.5558, source.compute=3
+cache 训练数据:
+  第 1 轮: w=0.0708, gradient=-4.2500, source.compute=3
+  第 2 轮: w=0.1255, gradient=-3.2788, source.compute=0
+  第 3 轮: w=0.1681, gradient=-2.5558, source.compute=0
+```
 
-对迭代式算法来说，cache 直接减少的是每一轮训练或迭代里重复读取同一批数据的成本。轮数越多、数据越大，这个差距越明显。
+先看两边相同的地方：三轮的 `w` 和 `gradient` 一模一样，`w` 从 0 一路涨到 `0.1681`（样本里 `x` 越大越是正类，所以权重朝正方向走）。这说明逻辑回归确实在学，而且不管缓不缓存训练数据，参数更新过程完全一致。
+
+差别只在最后那一列 `source.compute`：不缓存时每轮都是 3（每轮都把训练数据的 3 个分区重算一遍）；缓存以后，只有第一轮是 3，后两轮变成 0——训练数据算过一次就留在内存里，后面直接复用。
+
+这正是 cache 在迭代式算法里的价值：训练往往要跑几十上百轮，没有 cache 就等于把同一批数据读几十上百遍；如果数据在 HDFS 上，每轮都是一次磁盘和网络 I/O。把训练数据 RDD 缓存住，第一轮读进内存，后面的轮次都从内存里拿。
 
 ## 10.5 checkpoint：把血缘切断
 
-cache 解决的是“反复读同一批数据太贵”的问题，但它不改变数据的来源。缓存命中时，计算可以绕开上游；缓存一旦丢了，Spark 仍然可以沿着原来的血缘重新算回来。也就是说，cache 更像一条近路，路还在，只是平时不用每次都走。
+cache 解决的是“反复读同一批数据太贵”的问题，但它不改变数据的来源。缓存命中时，计算可以绕开上游；缓存一旦丢了，框架仍然可以沿着原来的血缘重新算回来。也就是说，cache 更像一条近路，路还在，只是平时不用每次都走。
 
-checkpoint 处理的是另一类问题：血缘太长时，重算的代价会一路累积，最后大到难以接受。拿 PageRank 来说，`links` 是固定的网页链接图，适合反复缓存；`ranks` 则会在每一轮迭代里由上一轮的 `ranks` 生成新的 `ranks`。如果第 20 轮某个分区丢了，还要从第 1 轮一路重算到第 20 轮，成本就太高了。
+checkpoint 处理的是另一类问题：血缘太长时，重算的代价会一路累积，最后大到难以接受。拿 PageRank（一种给网页算权重的迭代算法）来说，`links` 是网页之间的链接图，固定不变，适合反复缓存；`ranks` 是每个网页的当前权重，每一轮都由上一轮的 `ranks` 重新算出来。如果第 20 轮某个分区丢了，还要从第 1 轮一路重算到第 20 轮，成本就太高了。
 
 所以 checkpoint 要做两件事：
 
 1. 把当前 RDD 的每个分区写到一个可重新读取的位置
 2. 让这个 RDD 不再向前暴露父依赖
 
-当前例子仍然沿用前面的长血缘。`checkpointPoint` 不是 `RDD` 的字段，而是 `Main.runWithCheckpoint(...)` 里的一个局部变量：它表示从长血缘中间取出的那个 RDD。
+当前例子仍然沿用前面的长血缘。`checkpointPoint` 是 `Main.runWithCheckpoint(...)` 里的一个局部变量：它表示从长血缘中间取出的那个 RDD。
 
 ```java
-RDD<Integer> source = sc.parallelize(input, 3);
-RDD<Integer> chain = buildLongLineage(source);
-RDD<Integer> checkpointPoint = traceUp(chain, 3);
+private static void runWithCheckpoint(SparkContext sc, List<Integer> input) {
+    System.out.println();
+    System.out.println("Part C: checkpoint 中间 RDD，切断它的父依赖");
 
-checkpointPoint.checkpoint();
+    RDD<Integer> source = sc.parallelize(input, 3);
+    RDD<Integer> chain = buildLongLineage(source);
+    RDD<Integer> checkpointPoint = traceUp(chain, 3);
+
+    System.out.println("checkpoint 前依赖数: " + checkpointPoint.dependencies().size());
+    checkpointPoint.checkpoint();
+    System.out.println("checkpoint 请求后依赖数: " + checkpointPoint.dependencies().size());
+    System.out.println("isCheckpointed: " + checkpointPoint.isCheckpointed());
+
+    System.out.println("触发 checkpoint 的 collect: " + checkpointPoint.collect());
+    System.out.println("checkpoint 物化后依赖数: " + checkpointPoint.dependencies().size());
+    System.out.println("isCheckpointed: " + checkpointPoint.isCheckpointed());
+
+    source.resetComputeCount();
+    checkpointPoint.resetComputeCount();
+
+    RDD<Integer> downstream = checkpointPoint
+            .map(value -> value * 10)
+            .filter(value -> value > 200);
+    System.out.println("checkpoint 后继续往下计算: " + downstream.collect());
+    System.out.println("源头 compute 次数: " + source.getComputeCount());
+    System.out.println("checkpoint 点 compute 次数: " + checkpointPoint.getComputeCount());
+}
 ```
 
-这段代码只是登记 checkpoint 请求。真正触发计算的 action，是后面那次 `collect()`。
+把这段代码跑起来，前半段输出是这样的：
+
+```text
+Part C: checkpoint 中间 RDD，切断它的父依赖
+checkpoint 前依赖数: 1
+checkpoint 请求后依赖数: 1
+isCheckpointed: false
+触发 checkpoint 的 collect: [48, 54, 60, 66, 72, 78, 84]
+checkpoint 物化后依赖数: 0
+isCheckpointed: true
+```
+
+输出的关键，是中间那次跳变。调用 `checkpoint()` 之后，依赖数仍然是 1，`isCheckpointed` 仍然是 false；等到 `collect()` 跑完，依赖数才掉到 0，`isCheckpointed` 才变成 true。这说明 `checkpoint()` 这一步什么也没真正做，只是登记了一个请求；真正把分区写进文件、把血缘切断的，是后面那次 `collect()`。
+
+代码后半段还会从 checkpoint 点继续往下算一条 `downstream` 链，它用来验证血缘是不是真的被切断了，留到本节后面再看。下面先把这两步拆开。
 
 `checkpoint()` 只记录意图：
 
@@ -473,15 +532,33 @@ private Iterator<T> checkpointPartition(Partition partition) {
 1. `iterator(partition)` 不再沿父血缘往上算，而是直接读 checkpoint 文件。
 2. `dependencies()` 返回空列表，调度器再往上找时，会把这里当成血缘终点。
 
-真实 Spark 也是这个时间线：`rdd.checkpoint()` 先记录请求，后续 action 第一次把这个 RDD 算出来时，再把结果写到可靠存储。mini-Spark 使用本地临时目录作为 checkpoint 位置，但保留同一个核心流程：先在 action 中物化分区结果，再切断血缘。
+这两个变化合起来，等于把这个 RDD 原地变成了一个 source RDD。
+
+source RDD 之所以是「源头」，靠的就是这两条：没有父依赖、自己能产出分区数据。`ListRDD` 就是这样——`dependencies()` 返回空，`compute()` 直接读内存列表里的数据。
+
+物化后的 RDD 这两条都满足：`dependencies()` 被改成返回空，读取时直接读 checkpoint 文件。所以对下游 RDD 和调度器而言，它和一个 `ListRDD` 没有本质区别，都是血缘的终点。
+
+差别只在数据从哪儿来：source RDD 读的是外部输入（用户传进来的列表、磁盘上的原始文件），checkpoint RDD 读的是它自己之前算过、再写下来的结果。但这不影响「无父依赖、自产数据」这个身份。
+
+这一点可以用示例后半段的 `downstream` 验证。前面 `runWithCheckpoint` 的代码里，`checkpointPoint` 物化之后还从它往下建了一条 `downstream` 链再 `collect`，输出是：
+
+```text
+checkpoint 后继续往下计算: [480, 540, 600, 660, 720, 780, 840]
+源头 compute 次数: 0
+checkpoint 点 compute 次数: 0
+```
+
+源头是 0，说明 `downstream` 算的时候没有回溯到 `ListRDD`；checkpoint 点也是 0，说明它连自己的 `compute()` 都没调，直接从 checkpoint 文件读。依赖数变 0 是调度器看到的景象，`compute` 次数为 0 是实际执行的结果——两点合起来，血缘是真的被切断了，下游不再回头。
+
+把请求登记和物化分开，是这个机制的关键。`checkpoint()` 通常写在构建 RDD 的代码里，那一刻还没有任何 action，分区结果还没算出来。若要求它在调用那一刻就把数据写进文件，框架只能自己在背后触发一次 action，把分区算出来再写，凭空多一轮计算。所以请求只负责登记，物化等下一个 action 第一次访问这个 RDD 时再发生——它顺着用户已经要做的计算走，不另起一趟。
+
+物化的目标位置必须能被重新读取。本章用本地临时目录扮演这个角色：写文件、读文件、再切断血缘，与落到分布式存储的流程一致，只是位置换成了本机磁盘。
 
 ## 10.6 dependencies 为什么变成 final
 
-checkpoint 不只是“下次从文件读”。
+上一节验证了 checkpoint 真的切断了血缘：依赖数变 0、下游的 `compute` 次数也变 0。这两件事是怎么在代码上保证的？
 
-它还要让调度器看见：这个 RDD 已经没有父依赖了。
-
-可以把两层职责分开记：
+checkpoint 其实动了两个入口，职责要分开看：
 
 ```text
 iterator()      决定分区数据从哪儿读
@@ -492,88 +569,47 @@ dependencies()  决定调度器还能不能继续向上找
 
 如果 checkpoint 物化后 `dependencies()` 仍然返回父 RDD，调度器还是会继续向上追。那就没有真正切断血缘。
 
-所以本章把 `dependencies()` 放到父类 `RDD` 里，并且设为 `final`：
+这条规则不能交给每个子类自己处理：否则每个 `MapPartitionsRDD`、`ListRDD` 都得在自己的依赖方法开头判断一遍「我是不是已经 checkpoint 了？是的话就不返回父 RDD」，每个子类都要抄一遍这段判断，只要有一个漏掉，它的 checkpoint 就形同虚设——调度器照样能从它追到父 RDD，血缘根本没断。
+
+所以本章把这条判断收到父类 `RDD` 的 `dependencies()` 里，并设成 `final`，子类不能再重写。父类长这样：
 
 ```java
-public final List<Dependency<?>> dependencies() {
-    if (checkpointed) {
-        return List.of();
+public abstract class RDD<T> {
+    // ...
+
+    public final List<Dependency<?>> dependencies() {
+        if (checkpointed) {
+            return List.of();
+        }
+        return getDependenciesInternal();
     }
-    return getDependenciesInternal();
+
+    // 子类只实现这个：返回自己原本的父依赖
+    protected abstract List<Dependency<?>> getDependenciesInternal();
 }
 ```
 
-子类不再重写 `dependencies()`，而是改写：
+`dependencies()` 是 `final`，里面只做一件事——checkpoint 物化了就返回空，否则委托给 `getDependenciesInternal()`。子类碰不到这段判断，只能实现 `getDependenciesInternal()`，老老实实交代自己的父依赖：
 
 ```java
-protected abstract List<Dependency<?>> getDependenciesInternal();
-```
-
-`MapPartitionsRDD` 仍然有一个父 RDD：
-
-```java
+// MapPartitionsRDD：由 map 产生，有一个父 RDD
 protected List<Dependency<?>> getDependenciesInternal() {
     return dependencies;
 }
-```
 
-`ListRDD` 仍然没有父 RDD：
-
-```java
+// ListRDD：parallelize 产生，本身就是源头，没有父 RDD
 protected List<Dependency<?>> getDependenciesInternal() {
     return List.of();
 }
 ```
 
-但 checkpoint 物化之后，父类会统一返回空列表。
+不管子类原本有没有父依赖，只要 checkpoint 物化，父类的 `dependencies()` 都会拦在前面返回空。前面看到依赖数从 1 变成 0，就是这个 `final` 方法生效的结果。
 
-这样可以把“checkpoint 物化后没有父依赖”这条规则收口到父类里，避免每个子类都重复判断一次。
+同一个思路也适用于 cache。前面 10.2 讲过，cache 的命中和填充都发生在 `iterator()` 里，而 `iterator()` 本来就是 `final`——子类不能重写它，只能重写 `compute(partition)`，告诉父类「这个分区原本该怎么算」。至于「命中缓存就直接返回」「没命中就算完存起来」，由父类的 `iterator()` 统一把关。
 
-## 10.7 跑一遍 checkpoint
+所以 cache 和 checkpoint 是同一个设计：把短路逻辑收到父类的 `final` 方法里，子类只负责「不短路时原本该怎么做」。区别只在它们改的是哪个入口——cache 改的是数据从哪儿读（`iterator()`），checkpoint 改的是依赖到哪儿停（`dependencies()`）。
 
-示例 Part C 会在同一个中间 RDD 上调用 `checkpoint()`，再用一次 `collect()` 触发物化：
-
-```text
-Part C: checkpoint 中间 RDD，切断它的父依赖
-checkpoint 前依赖数: 1
-checkpoint 请求后依赖数: 1
-isCheckpointed: false
-触发 checkpoint 的 collect: [48, 54, 60, 66, 72, 78, 84]
-checkpoint 物化后依赖数: 0
-isCheckpointed: true
-```
-
-先看前两个数字：调用 `checkpoint()` 以后，依赖数仍然是 1，`isCheckpointed` 仍然是 false。因为这时只是记录了 checkpoint 请求，还没有 action 真正把分区算出来。
-
-`collect()` 触发计算以后，checkpoint 文件才写出来。等所有分区都写完，依赖数变成 0。这意味着 `DAGScheduler` 再从这个 RDD 往上找父 Stage 时，到这里就停了。
-
-随后示例从 checkpoint RDD 继续往下建一条链：
-
-```java
-RDD<Integer> downstream = checkpointPoint
-        .map(value -> value * 10)
-        .filter(value -> value > 200);
-```
-
-再执行 `collect()`：
-
-```text
-checkpoint 后继续往下计算: [480, 540, 600, 660, 720, 780, 840]
-源头 compute 次数: 0
-checkpoint 点 compute 次数: 0
-```
-
-源头是 0，说明没有回溯到 `ListRDD`。
-
-checkpoint 点也是 0，说明没有调用这个 RDD 原来的 `compute()`，而是直接从 checkpoint 文件读。
-
-checkpoint 和 cache 的区别就落在这里。
-
-cache 命中时不走血缘；缓存没命中时，血缘还在。
-
-checkpoint 完成后，血缘被切断。下游再重算，最多追到 checkpoint 文件。
-
-## 10.8 本章小结
+## 10.7 本章小结
 
 第 8 章说：血缘让失败的分区可以重算。
 
@@ -591,7 +627,7 @@ checkpoint 把分区结果写到磁盘，并让 `dependencies()` 返回空列表
 RDD.iterator(partition)
 ```
 
-前几章里，所有父子 RDD 都通过它读取分区。到了第 10 章，这个统一入口接住了两种短路：
+前几章里，所有父子 RDD 都通过它读取分区。到了第 10 章，这个统一入口同时承担 cache 和 checkpoint 两种短路：
 
 ```text
 checkpoint 命中 -> 读磁盘文件
