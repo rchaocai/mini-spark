@@ -181,7 +181,7 @@ flowchart TD
 
 ### 11.4.1 一条 action 怎么跑完
 
-把 Part B 那段 `map → reduceByKey → collect` 跑起来，DAGScheduler 会先把 Stage 划分结果打印出来，再按顺序提交：
+把那段 `map → reduceByKey → collect` 跑起来，DAGScheduler 会先把 Stage 划分结果打印出来，再按顺序提交：
 
 ```text
 Stage 划分结果:
@@ -389,7 +389,7 @@ Reduce 端反过来。轨迹里 `开始计算结果分区` 之后，`ShuffledRDD
 
 这是运行行为对照里最值得看的一段，也是前几章机制讲解的「现场回放」。第 8 章讲过为什么要把失败分成两层处理；这里看它跑起来的样子，并和真实 Spark 对照。
 
-Main 的 Part C 注入了两种失败，分别触发两层恢复。
+Main 的故障恢复演示注入了两种失败，分别触发两层恢复。
 
 **第一层：Task 抛异常，TaskScheduler 只重试这一个 Task**
 
@@ -595,24 +595,6 @@ Spark 0.7：用 storageLevel 分流——设了缓存级别走 cache，没设才
 
 共同点不变：cache 命中直接返回内存；checkpoint 完成后读 `CheckpointRDD`，不再沿旧血缘 compute。
 
-checkpoint 的另一半在 `dependencies()`：物化后，0.7 让依赖指向 `CheckpointRDD`，你也一样——`dependencies()` 返回一个 `OneToOneDependency(checkpointRDD)`，调度器追到 `CheckpointRDD`（叶子，无父依赖）就停，原血缘被切断。
-
-> [!INFO]
-> **写入（物化）的时机，两边不一样**
->
-> 上面只对照了读取。两边把分区写进 checkpoint 文件的时机不同：
->
-> ```text
-> 你的实现：物化搭下一次读取的便车——iterator 的 checkpointRequested 分支，
->          下一个 action 读到分区时边算边写，不另起一趟计算
-> Spark 0.7：物化是独立一步——DAGScheduler 在用该 RDD 的 job 跑完后，
->          再专门跑一个 job（runJob + CheckpointRDD.writeToFile）把它写进文件
-> ```
->
-> 所以 0.7 的 `computeOrReadCheckpoint` 只管读：写入不在 iterator 里，而在 `RDDCheckpointData.doCheckpoint`，由 DAGScheduler 在 job 结束后单独触发——这也解释了为什么 0.7 要多一个 `RDDCheckpointData` 组件来管这件事。
->
-> 为什么 Spark 宁可多一轮 job 也要这么做？主要是**完整性**和**时机**：搭便车要求下游 action 把这个 RDD 的每个分区都读一遍才能物化完整，只读一部分就永远写不全；独立 job 强制遍历所有分区，保证写全。而且它在「用该 RDD 的 job 刚跑完」那一刻立刻触发，数据多半还在 cache，物化能直接复用、不必重算。再加上状态机管着进度，物化过程可见、可独立重试——这些在生产集群里是必须的。我们搭便车省了那一轮 job，代价是默认「总会完整读取」：教学场景够用，生产场景不够稳。
-
 > [!INFO]
 > **`CacheTracker` 和你的 `Map` 有什么差别？**
 >
@@ -632,6 +614,24 @@ checkpoint 的另一半在 `dependencies()`：物化后，0.7 让依赖指向 `C
 >   没命中就 compute
 >   再把结果存回去
 > ```
+
+checkpoint 的另一半在 `dependencies()`：物化后，0.7 让依赖指向 `CheckpointRDD`，你也一样——`dependencies()` 返回一个 `OneToOneDependency(checkpointRDD)`，调度器追到 `CheckpointRDD`（叶子，无父依赖）就停，原血缘被切断。
+
+> [!INFO]
+> **写入（物化）的时机，两边不一样**
+>
+> 上面只对照了读取。两边把分区写进 checkpoint 文件的时机不同：
+>
+> ```text
+> 你的实现：物化搭下一次读取的便车——iterator 的 checkpointRequested 分支，
+>          下一个 action 读到分区时边算边写，不另起一趟计算
+> Spark 0.7：物化是独立一步——DAGScheduler 在用该 RDD 的 job 跑完后，
+>          再专门跑一个 job（runJob + CheckpointRDD.writeToFile）把它写进文件
+> ```
+>
+> 所以 0.7 的 `computeOrReadCheckpoint` 只管读：写入不在 iterator 里，而在 `RDDCheckpointData.doCheckpoint`，由 DAGScheduler 在 job 结束后单独触发——这也解释了为什么 0.7 要多一个 `RDDCheckpointData` 组件来管这件事。
+>
+> 为什么 Spark 宁可多一轮 job 也要这么做？主要是**完整性**和**时机**：搭便车要求下游 action 把这个 RDD 的每个分区都读一遍才能物化完整，只读一部分就永远写不全；独立 job 强制遍历所有分区，保证写全。而且它在「用该 RDD 的 job 刚跑完」那一刻立刻触发，数据多半还在 cache，物化能直接复用、不必重算。再加上状态机管着进度，物化过程可见、可独立重试——这些在生产集群里是必须的。我们搭便车省了那一轮 job，代价是默认「总会完整读取」：教学场景够用，生产场景不够稳。
 
 ## 11.5 结构速查：类与签名
 
@@ -660,7 +660,7 @@ preferredLocations   ↔ preferredLocations()
 > [!INFO]
 > **真实 Spark 用的 API 很老**
 >
-> 上面右边的 `splits` / `Split` / `ClassManifest`，是 Spark 早期版本的叫法。后来的版本里，`splits` 改名 `partitions`、`Split` 改名 `Partition`、`ClassManifest` 换成 `ClassTag`。本书对照的是 RDD 时代的早期版本，所以名字和你翻最新 Spark 3.x 源码会不一样——底座没换。
+> 真实 Spark 0.5 用的是一套老名字：分区叫 `splits`、分区类型叫 `Split`、泛型类型证据叫 `ClassManifest`。后来的版本里，它们分别改名 `partitions` / `Partition` / `ClassTag`。本书对照的是 RDD 时代的早期版本，所以名字和你翻最新 Spark 3.x 源码会不一样——底座没换。
 
 你多做的一点，是第 10 章把 `dependencies()` 收成了 `final`：
 
@@ -858,13 +858,7 @@ I/O 适配
 
 这些外衣每一层都是工程问题，不是魔法。
 
-打开 `reference-notes/spark-source-map.md`，再打开参考工程里的：
-
-```text
-core/src/main/scala/spark/RDD.scala
-```
-
-读前几行：
+直接看真实 Spark [`RDD.scala`](https://github.com/apache/spark/blob/branch-0.5/core/src/main/scala/spark/RDD.scala) 的前几行（branch-0.5）：
 
 ```scala
 def splits: Array[Split]
