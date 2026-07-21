@@ -1,8 +1,8 @@
 # 真实 Spark 源码对照地图
 
-> 支撑第 11 章（祛魅），也供各章 spec「参考对照」一节引用。
-> 参考工程根目录：`/Users/cairuchao/project/spark`（早期 Apache Spark，**Scala / SBT，无 Spark SQL**）。
-> 下表「真实 Spark 文件」均相对该根目录。
+> 支撑第 11 章（运行行为对照），也供各章 spec「参考对照」一节引用。
+> 参考工程：[apache/spark](https://github.com/apache/spark) 的 [`branch-0.5`](https://github.com/apache/spark/tree/branch-0.5) 分支（约 `v0.5.2`，早期 Apache Spark，**Scala / SBT，无 Spark SQL**）。
+> 下表「真实 Spark 文件」均相对仓库根目录（如 `core/src/main/scala/spark/RDD.scala`）。
 
 ## Scala 速查（给 Java 读者）
 - `case class Foo(x: Int)` ≈ Java `record Foo(int x)`。
@@ -33,6 +33,7 @@
 | 容错重试 | 8 | `core/src/main/scala/spark/LocalScheduler.scala` | `failCount` / `maxFailures` 重试 |
 | fetch failure | 8 | `core/src/main/scala/spark/DAGScheduler.scala` | shuffle 拉取失败处理 |
 | Cache / persist | 10 | `core/src/main/scala/spark/RDD.scala`（`cache()`）、`CacheTracker.scala`、`BoundedMemoryCache.scala` | 内存缓存 + 缓存跟踪 |
+| Checkpoint（切断血缘） | 10 | （**0.5 无**；v0.7.0 起）`rdd/CheckpointRDD.scala`、`RDD.scala` | `checkpoint()`；checkpoint 后 `final def dependencies` 改指向 `CheckpointRDD`，切断血缘 |
 | RPC / 分布式通信 | 9 | `core/src/main/scala/spark/Executor.scala`、`HttpServer` | 本书 `NetworkTaskScheduler`/`Executor` 用 Java Socket；参考工程用 **Scala Actors + HTTP** |
 | DataFrame / Catalyst | 12 | （参考工程无） | 指向**现代 Spark** 的 `sql/catalyst` 模块 |
 

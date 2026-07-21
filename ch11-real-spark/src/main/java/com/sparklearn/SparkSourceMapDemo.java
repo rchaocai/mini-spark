@@ -107,8 +107,8 @@ public final class SparkSourceMapDemo {
             new Entry("Checkpoint（切断血缘）", 10,
                     "RDD",
                     "checkpoint() → 物化分区后 dependencies() 返回空",
-                    "core/src/main/scala/spark/RDD.scala",
-                    "checkpoint 逻辑分布在 RDD / SparkContext 中"),
+                    "（0.5 无；v0.7.0 起）rdd/CheckpointRDD.scala + RDD.scala",
+                    "def checkpoint()；final def dependencies 改指向 CheckpointRDD"),
 
             new Entry("网络 RPC", 9,
                     "NetworkTaskScheduler / Executor",
