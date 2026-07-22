@@ -311,7 +311,7 @@ DataFrame 惰性：积累逻辑计划树
 
 RDD 里每个元素可以是任意 Java 对象。DataFrame 不一样，它必须知道“列”。
 
-这里用三个对象表达这件事。
+这里先用三个对象表达这件事。
 
 ### 13.4.1 Row：有列名的一行
 
@@ -413,7 +413,70 @@ salary
 
 所以列裁剪规则知道：为了算 `adjusted_salary`，扫描时不需要读 `id` 和 `department`。
 
-## 13.5 Catalyst：规则改写不可变树
+## 13.5 逻辑计划：把每一步关系操作串成树
+
+`Expression` 只描述一行里的小计算：
+
+```text
+salary > 50000
+salary * 1.25
+```
+
+`LogicalPlan` 描述的是“整张表怎么变”：
+
+```text
+Scan       从哪里读
+Filter     保留哪些行
+Project    输出哪些列
+Aggregate  按哪些列分组、做什么聚合
+```
+
+DataFrame API 每调用一次，就在原来的计划外面包一层。
+
+刚创建表时，只有一个叶子节点：
+
+```text
+Scan(employees)
+```
+
+调用：
+
+```java
+employees.where(col("salary").gt(50_000))
+```
+
+计划变成：
+
+```text
+Filter(salary > 50000)
+  └── Scan(employees)
+```
+
+再调用：
+
+```java
+.select(col("name"), col("salary").multiply(1.25).as("adjusted_salary"))
+```
+
+计划继续长成：
+
+```text
+Project(name, salary * 1.25 AS adjusted_salary)
+  └── Filter(salary > 50000)
+      └── Scan(employees)
+```
+
+到这里，仍然没有读一行数据。树只是越来越完整。
+
+```mermaid
+flowchart BT
+    Scan[Scan employees] --> Filter[Filter salary > 50000]
+    Filter --> Project[Project name, adjusted_salary]
+```
+
+这就是逻辑计划的意义：先把“要什么”完整记下来，再交给优化器决定这棵树能不能换个更省事的形状。
+
+## 13.6 Catalyst：规则改写不可变树
 
 Catalyst 最重要的不是某一条具体优化，而是这套处理查询的方式：
 
@@ -474,7 +537,7 @@ PruneScanColumns     让 Scan 只读需要的列
 
 这三条足够看清 Catalyst 的工作方式。
 
-### 13.5.1 谓词下推
+### 13.6.1 谓词下推
 
 规则代码很短：
 
@@ -518,7 +581,7 @@ pushedFilters    能推给数据源的过滤条件
 
 这里有一个边界要说清楚：为了让计划变化最直观，代码里直接把 `Filter` 节点合进了 `Scan`。Spark 1.3.0 通常更谨慎：它会把可转换的过滤条件传给数据源，但还会在 Spark 侧保留一层 `Filter`。因为数据源下推有时只是“尽量少读”的优化提示，不能总是假设外部系统已经精确完成了全部过滤。
 
-### 13.5.2 列裁剪
+### 13.6.2 列裁剪
 
 列裁剪规则看的是表达式引用：
 
@@ -559,7 +622,7 @@ salary
 
 这里是内存数据源，看不到 I/O 差距，但执行计划已经长出了 Spark SQL 的形状。
 
-## 13.6 物理计划：落回 RDD
+## 13.7 物理计划：落回 RDD
 
 优化后的逻辑计划还不能直接跑。它只说“要什么”，还没有说“怎么用 mini-spark 跑”。
 
@@ -581,7 +644,7 @@ if (logicalPlan instanceof Aggregate aggregate) {
 
 每个 `Exec` 节点都知道怎么生成 RDD。
 
-### 13.6.1 ProjectExec = RDD.map
+### 13.7.1 ProjectExec = RDD.map
 
 `ProjectExec` 的核心就是：
 
@@ -599,7 +662,7 @@ return child.execute().map(row -> {
 
 DataFrame 的 `select()` 看起来是新 API，落到底层仍然是 `map`。
 
-### 13.6.2 ScanExec = RDD.filter + RDD.map
+### 13.7.2 ScanExec = RDD.filter + RDD.map
 
 `ScanExec` 接收优化器塞进来的两个信息：
 
@@ -623,7 +686,7 @@ return current;
 
 在 Spark 里，如果底层是 Parquet、JDBC、HBase，这一步可能真的把过滤和列裁剪传给外部系统，让外部系统少读数据。这里是内存表，所以还是转成 RDD 的 `filter` / `map`。接口位置是一样的，但 Spark 通常还会保留 Spark 侧过滤，保证结果语义不依赖外部数据源是否完全过滤干净。
 
-### 13.6.3 HashAggregateExec = RDD.reduceByKey
+### 13.7.3 HashAggregateExec = RDD.reduceByKey
 
 第二个查询：
 
@@ -674,9 +737,7 @@ ResultStage 2 (rdd=MapPartitionsRDD, parents=[1])
 
 这一串正好把全书连起来。
 
-## 13.7 顺手定位 Spark SQL 源码
-
-第 12 章对照的是 Spark `branch-0.5`，那个版本没有 SQL。
+## 13.8 源码入口（选读）
 
 第 12 章对照的是 Spark `branch-0.5`，那个版本没有 SQL。要看 Spark SQL，需要切到更后面的代码。Spark 1.3.0 已经能看到这条链上的几个入口：
 
@@ -725,7 +786,7 @@ flowchart LR
 
 主线对上以后，再读源码，复杂度就有位置了。
 
-## 13.8 小结
+## 13.9 小结
 
 走到这里，并没有推翻 RDD。
 
