@@ -268,9 +268,11 @@ public Optional<RDD<U>> compute(Time validTime) {
 }
 ```
 
-`DStream.map` 只是 `new` 一个 `MappedDStream` 挂上去——和 `rdd.map` 一样惰性，不算数据。真正兑现对应的是 `MappedDStream.compute`：到某个时间点，先 `parent.getOrCompute(validTime)` 拿到父流在这个 batch 的 RDD，再对它调 `rdd.map(mapFunc)`——这一下，和第 1 章对 RDD 调的 `map` 是同一个。
+`DStream.map` 只是 `new` 一个 `MappedDStream` 挂上去——和 `rdd.map` 一样惰性，不算数据。真正干活的是 `MappedDStream.compute`。这一行从左往右读，先 `parent.getOrCompute(validTime)`——`parent` 是父流，也就是这条流的上一节点。在 WordCount 里，`map` 这步的父流就是 `flatMap` 那步；`getOrCompute(validTime)` 在 `validTime` 这个时间点向父流要一个 RDD，`validTime` 是 `Time(1000)` 时，就拿回 `flatMap` 在 `Time(1000)` 算出来的那个 RDD（一串拆好的词）。
 
-注意这行里有两个 `map`：外面的 `.map(...)` 是 `Optional.map`，父 RDD 包在 `Optional` 里（队列空时可能没有），外层 `map` 的意思是“有就往下算”；里面那个 `rdd.map(mapFunc)` 才是真正的 RDD 变换。换个时间点再调一次 `compute`，又对那个时间点的父 RDD 做一次同样的 `map`——这就是“同一个 RDD 变换，每个时间点都做一遍”。
+拿到这个父 RDD，再对它调 `rdd.map(mapFunc)`，把每个词变成 `(词, 1)`——这一下，和第 1 章对 RDD 调的 `map` 是同一个。
+
+注意这行里有两个 `map`：外面的 `.map(...)` 是 `Optional.map`——父 RDD 包在 `Optional` 里（队列空、没数据时可能拿不到），外层 `map` 的意思是“有就往下算，没有就跳过”；里面那个 `rdd.map(mapFunc)` 才是真正的 RDD 变换。换个时间点再调一次 `compute`，又对那个时间点的父 RDD 做一次同样的 `map`——这就是“同一个 RDD 变换，每个时间点都做一遍”。
 
 表里有两处要看清，它们是“对应”的边界，不是反例。其一，前六行每个节点都**造**一个 RDD，唯独输出流 `ForEachDStream` 不造——它的 `compute` 返回空，对应的是一个 **action**，负责把最末端那个 RDD 真正算出来。其二，前几行只吃父流**同一个**时间点的 RDD，`WindowedDStream` 却吃父流**多个**时间点的 RDD（它要跨好几个 batch）。这两处都不改"模板印实例"的整体形状，只说明在输出和窗口这两类节点上，DStream 对应的分别是 action 和跨时间段的 union。
 
@@ -282,15 +284,15 @@ public Optional<RDD<U>> compute(Time validTime) {
 - **血缘**：模板本身就是一张依赖图，丢了某个 batch 的 RDD，沿它重算。
 - **容错**：既然每个 batch 的状态就是一个 RDD，第 8 章的重算、第 10 章的 cache/checkpoint，原样可用。
 
-DStream 没有新造一套引擎。它只是把"一个 RDD 变换"封装成"每个时间点都做一次这个变换"，再在外面加一个按时间推进的驱动器去触发。余下几节，就看这个驱动器和这套封装怎么动起来。
+DStream 没有新造一套引擎。它只是把“一个 RDD 变换”封装成“每个时间点都做一次这个变换”，再交给 `StreamingContext` 按时间一步步推进去触发。余下几节，就看 `StreamingContext` 怎么把时间一格一格往前推、DStream 这套封装怎么跟着动起来。
 
 ## 11.5 三个零件：Time、DStream 的内部、StreamingContext
 
-11.4 讲清了 DStream 是什么。这一节拆开三个具体对象：时间怎么表示、DStream 内部怎么把"造 RDD"做实、谁来按时间驱动。
+这一节看三样东西：时间怎么表示、DStream 内部怎么把 RDD 真的造出来、谁来按时间驱动。
 
 ### 11.5.1 Time 与 Duration：一条逻辑时间轴
 
-`Duration` 是一段时间长度，`Time` 是一个时间点。它们的实现朴素到几乎没有东西：
+`Duration` 是一段时间长度，`Time` 是一个时间点。两个类都只包了一个毫秒数：
 
 ```java
 public final class Time implements Serializable, Comparable<Time> {
@@ -313,7 +315,7 @@ zeroTime       = Time(0)
 第 3 个 batch  = Time(3000)
 ```
 
-这里有个细节值得停一下：时间**不是用墙钟（真实时钟）推进的**，没有任何后台线程在每秒触发一次。`StreamingContext` 提供的是一个手动拨时间的动作——`advance()` 拨一格，时间往前走一个 `batchDuration`。
+这里有个细节值得停一下：时间**不是用墙钟（真实时钟）推进的**，没有任何后台线程在每秒触发一次。`StreamingContext` 提供的是一个手动把时间往前推的动作——`advance()` 推一格，时间往前走一个 `batchDuration`。
 
 为什么要这样？因为"什么时候该往前走一格"和"走到这一格要算什么"，是两件最好分开的事。把它们解耦之后，业务逻辑（算词频）只认逻辑时间点，不认墙钟：想要每秒走一格，就在外面挂一个定时器去调 `advance()`；想要在测试里精确控制，就手动一格一格拨。同一个计算图，两种推进方式都能用。
 
