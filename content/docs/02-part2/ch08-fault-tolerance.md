@@ -281,7 +281,7 @@ ListRDD
 >
 > `failOnNext(...)` / `FaultyRDD` 只是本章的故障注入工具，用来稳定指定“哪个分区、读到第几条时失败”。真正的容错变化发生在 `TaskScheduler` 中。
 >
-> 这样做也避免了为了演示故障而修改 `MapPartitionsRDD` 的通用接口。教学辅助代码和 RDD 核心抽象保持分离。
+> 这样做也避免了为了演示故障而修改 `MapPartitionsRDD` 的通用接口。故障注入代码和 RDD 核心抽象保持分离。
 
 ## 8.4 异常怎样走到 TaskScheduler
 

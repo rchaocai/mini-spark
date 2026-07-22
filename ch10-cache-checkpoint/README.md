@@ -3,7 +3,7 @@
 本章从第 9 章的网络执行代码继续往前走，在 `RDD.iterator(partition)`
 这个统一入口上加入 cache 和 checkpoint。
 
-这里的实现是一个规模很小但闭环完整的 mini-Spark 项目，重点放在教学阅读；不是完整的分布式缓存或可靠 checkpoint。
+这里的实现规模很小但闭环完整，优先保证可读；不是完整的分布式缓存或可靠 checkpoint。
 
 核心变化：
 

@@ -1,8 +1,8 @@
 # 第 12 章 · 从 RDD 到 DataFrame
 
-本章在第 11 章拆开的 RDD 内核之上，加一个教学版 Spark SQL / DataFrame 层。
+本章在第 11 章拆开的 RDD 内核之上，加一层 Spark SQL / DataFrame。
 
-目录刻意拆开：
+包结构按职责分成两组：
 
 ```text
 com.sparklearn.core.*                   # RDD / Stage / Shuffle / Task 执行内核

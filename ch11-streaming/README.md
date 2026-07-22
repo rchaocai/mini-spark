@@ -1,8 +1,8 @@
 # 第 11 章 · Spark Streaming 与 DStream
 
-本章在第 10 章完整 mini-Spark 内核之上，实现一个教学版 Spark Streaming。
+本章在第 10 章的执行内核之上，实现一个 DStream 微批调度层。
 
-目录刻意拆开：
+包结构按职责分成两组：
 
 ```text
 com.sparklearn.core.*                 # RDD / Stage / Shuffle / Task 执行内核

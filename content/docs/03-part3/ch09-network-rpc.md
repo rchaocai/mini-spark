@@ -533,7 +533,7 @@ if (!response.success()) {
 > [!INFO]
 > **真实 Spark 的序列化和 RPC**
 >
-> 本章用 `ObjectOutputStream` 把对象写进 `Socket`，是为了让你看见最小的一条链路。
+> 这里用 `ObjectOutputStream` 把对象写进 `Socket`，是最小的一条链路。
 >
 > 真实 Spark 把这件事拆成两层。第一层是序列化：`JavaSerializer` 使用 Java 自带对象序列化，`KryoSerializer` 使用开源库 Kryo。Kryo 通常比 Java 序列化更快、结果也更紧凑，但为了更好性能，常常需要提前注册自定义类。
 >
