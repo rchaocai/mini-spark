@@ -60,14 +60,14 @@ employees
 
 用户不再直接告诉系统“先 map 再 filter 再 shuffle”，而是描述“我要哪些列、过滤哪些行、按什么分组”。系统先把这段描述保存成一棵树，再用优化器改写它，最后把改写后的树翻译回你熟悉的 RDD 变换。
 
-这就是 Spark SQL 论文《Spark SQL: Relational Data Processing in Spark》（SIGMOD 2015）里的主线。论文里有两个关键设计：
+Spark SQL 后来的设计，就是沿着这条路走下去：上面给用户一个能和普通 Spark 程序混在一起写的 DataFrame API，下面用 Catalyst 把查询保存成树、改写成更好的树。
 
 ```text
 DataFrame API：把关系查询和 Spark 程序紧密接在一起
 Catalyst：用可组合规则改写不可变树
 ```
 
-本章不做完整 SQL 解析器，也不实现真正的成本模型。我们只实现一条最小但完整的路径：
+本章不做完整 SQL 解析器，也不实现复杂的物理计划选择。我们只实现一条最小但完整的路径：
 
 ```text
 DataFrame DSL
@@ -133,6 +133,17 @@ department
 count(*)
 ```
 
+这时候，系统手里多了几张明牌：
+
+```text
+它知道 salary 是过滤条件要用的列
+它知道 name / salary 是最终输出要用的列
+它知道 department 是分组 key
+它知道 count(*) 会触发聚合
+```
+
+有了这些信息，系统就可以做一些 RDD lambda 做不了的事：先过滤再投影、只读需要的列、把过滤条件尽量推到数据源附近、遇到分组再引入 shuffle。
+
 这些表达式有列名、有类型、没有副作用。系统看得懂，就能改写。
 
 这就是声明式接口的价值：
@@ -164,13 +175,13 @@ DataFrame adjustedSalary = employees
 
 注意这段代码没有立刻扫描数据。`where()` 和 `select()` 只是返回新的 `DataFrame`，每个 `DataFrame` 里面保存一棵新的逻辑计划树。
 
-真正触发执行的是：
+示例程序先打印执行计划：
 
 ```java
-adjustedSalary.show();
+System.out.println(adjustedSalary.explainString());
 ```
 
-运行时会先打印三棵树。
+所以你会先看到三棵树。
 
 第一棵是原始逻辑计划：
 
@@ -200,7 +211,7 @@ Project(name, salary * 1.25 AS adjusted_salary)
 变化有两个：
 
 ```text
-谓词下推：Filter 被推入 Scan，数据源扫描时就过滤
+谓词下推：本章把 Filter 合进 Scan，扫描时先过滤
 列裁剪：Scan 不再读 id / department，只读 name / salary
 ```
 
@@ -219,7 +230,13 @@ ProjectExec(name, salary * 1.25 AS adjusted_salary)
 物理计划：描述怎么执行
 ```
 
-最后才落回 RDD：
+然后示例程序调用：
+
+```java
+adjustedSalary.show();
+```
+
+这一步才真正落回 RDD、提交 job、打印结果：
 
 ```text
 Stage 划分结果:
@@ -270,9 +287,9 @@ DataFrame = 带 schema 的惰性逻辑计划
 
 `select()` 没有计算列，只是在树上加一个 `Project` 节点。
 
-`groupBy().count()` 没有立刻 shuffle，只是在树上加一个 `Aggregate` 节点。
+`groupBy(...).count()` 这里是聚合 DSL，它没有立刻 shuffle，只是返回一个带 `Aggregate` 节点的新 `DataFrame`。
 
-只有 `collect()`、`show()`、`count()` 这类 action 才会触发：
+直接对 `DataFrame` 调 `collect()`、`show()`、`count()` 这类 action，才会触发：
 
 ```text
 logicalPlan
@@ -397,7 +414,7 @@ salary
 
 ## 13.5 Catalyst：规则改写不可变树
 
-Spark SQL 论文里讲 Catalyst 时，重点不是某一条具体优化，而是这个框架：
+Catalyst 最重要的不是某一条具体优化，而是这套处理查询的方式：
 
 ```text
 TreeNode
@@ -420,22 +437,28 @@ sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/Optimizer.sc
 
 ```java
 public final class RuleExecutor {
+    private static final int MAX_ITERATIONS = 20;
+
     public LogicalPlan execute(LogicalPlan plan) {
         LogicalPlan current = plan;
         for (Batch batch : batches) {
+            int iteration = 0;
             boolean changed = true;
-            while (changed) {
+            while (changed && iteration < MAX_ITERATIONS) {
                 LogicalPlan before = current;
                 for (PlanRule rule : batch.rules()) {
                     current = current.transformUp(rule);
                 }
                 changed = !current.equals(before);
+                iteration++;
             }
         }
         return current;
     }
 }
 ```
+
+这里的 fixed point 不是无限等下去。每一轮都比较新旧两棵树；如果树不再变化，就停。如果某些规则来回振荡，也会被 `MAX_ITERATIONS` 截住。真实优化器也需要这种安全边界。
 
 真实 Catalyst 的规则很多。本章只写三条：
 
@@ -473,7 +496,7 @@ Filter(condition)
 Scan(table, pushedFilters=[condition])
 ```
 
-这和 Spark SQL 论文里讲的数据源接口是同一个思路。论文把数据源能力分成几档：
+真实 Spark SQL 的数据源接口也按能力分层。最简单的数据源只能全表读；更强一点的，可以接收“需要哪些列”；再强一点的，还可以接收“哪些过滤条件可以尽量提前做”：
 
 ```text
 TableScan             只能全表读
@@ -488,6 +511,8 @@ CatalystScan          能接收更完整的 Catalyst 表达式
 requiredColumns  要读哪些列
 pushedFilters    能推给数据源的过滤条件
 ```
+
+这里有一个边界要说清楚：本章为了让计划变化最直观，直接把 `Filter` 节点合进了 `Scan`。真实 Spark 1.3.0 通常更谨慎：它会把可转换的过滤条件传给数据源，但还会在 Spark 侧保留一层 `Filter`。因为数据源下推有时只是“尽量少读”的优化提示，不能总是假设外部系统已经精确完成了全部过滤。
 
 ### 13.5.2 列裁剪
 
@@ -592,7 +617,7 @@ if (!requiredColumns.isEmpty()) {
 return current;
 ```
 
-在真实 Spark 里，如果底层是 Parquet、JDBC、HBase，这一步可能真的把过滤和列裁剪推给外部系统。本章是教学版内存表，所以还是转成 RDD 的 `filter` / `map`。但接口位置是一样的。
+在真实 Spark 里，如果底层是 Parquet、JDBC、HBase，这一步可能真的把过滤和列裁剪传给外部系统，让外部系统少读数据。本章是教学版内存表，所以还是转成 RDD 的 `filter` / `map`。接口位置是一样的，但真实系统通常还会保留 Spark 侧过滤，保证结果语义不依赖外部数据源是否完全过滤干净。
 
 ### 13.6.3 HashAggregateExec = RDD.reduceByKey
 
@@ -635,7 +660,7 @@ ResultStage 2 (rdd=MapPartitionsRDD, parents=[1])
 提交 ResultStage 2 (rdd=MapPartitionsRDD, parents=[1])
 ```
 
-`groupBy().count()` 是 DataFrame API。
+`groupBy().count()` 先生成一个聚合 DataFrame。
 
 `HashAggregateExec` 是物理计划。
 
@@ -675,11 +700,11 @@ sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala
 | `ScanExec` | `sources/interfaces.scala` 相关 Scan 接口 | 数据源列裁剪与谓词下推 |
 | `HashAggregateExec` | `execution` 下的聚合 / join 物理算子 | 最终生成 RDD 执行 |
 
-真实源码更完整，多了四个大块：
+真实源码更完整，多了几个大块：
 
 ```text
 Analyzer：解析未绑定的表名、列名、函数名，检查类型
-Cost Model：在多个物理计划里按成本选择
+简单统计 / 启发式物理选择：例如按表大小选择 broadcast join
 Code Generation：把表达式编译成 JVM 字节码，减少解释执行开销
 Data Source API：接 Parquet / JSON / JDBC / Hive 等外部数据源
 ```
@@ -735,7 +760,7 @@ DataFrame 给 Spark 带来的是结构化信息：
 
 结构化信息越多，优化器能做的事越多。
 
-所以工业界后来更常写 SQL / DataFrame，不是因为 RDD 不重要，而是因为 RDD 已经沉到了执行底座里。你写的 `df.groupBy().count()`，最后仍然要变成 RDD 的 shuffle；你写的 `df.cache()`，底下仍然要短路血缘；你写的 `spark.sql()`，最终仍然要提交 Stage 和 Task。
+所以工业界后来更常写 SQL / DataFrame，不是因为 RDD 不重要，而是因为 RDD 已经沉到了执行底座里。你写的 `df.groupBy().count()` 生成的是聚合计划；等它被 `show()` / `collect()` 触发时，底下仍然要变成 RDD 的 shuffle。你写的 `df.cache()`，底下仍然要短路血缘；你写的 `spark.sql()`，最终仍然要提交 Stage 和 Task。
 
 从第 1 章到第 13 章，整条链已经打通：
 
