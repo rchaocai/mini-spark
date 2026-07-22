@@ -1,6 +1,6 @@
 # 手写 mini-spark（写给大数据初学者的 Spark 内核课）
 
-用 **Java 17 从零手写一个 mini-spark**，在亲手实现中理解 Spark 内核：RDD、惰性求值、Shuffle、Stage/DAG、容错、Cache，直至 DataFrame。不需要预先懂 Scala 或分布式——会基础 Java 就够了。
+用 **Java 17 从零手写一个 mini-spark**，在亲手实现中理解 Spark 内核：RDD、惰性求值、Shuffle、Stage/DAG、容错、Cache，直至 Streaming 与 DataFrame。不需要预先懂 Scala 或分布式——会基础 Java 就够了。
 
 > 在线阅读：[rchaocai.github.io/mini-spark](https://rchaocai.github.io/mini-spark/)
 
@@ -18,8 +18,9 @@
 | 8 | 容错：从 Task 重试到 Stage 恢复 | `ch08-fault-tolerance` |
 | 9 | 从单机到分布式执行 | `ch09-network-rpc` |
 | 10 | Cache 与 Checkpoint | `ch10-cache-checkpoint` |
-| 11 | 致敬工业级 Spark | `ch11-real-spark` |
-| 12 | 从 RDD 到 DataFrame | `ch12-dataframe-future` |
+| 11 | Spark Streaming 与 DStream | `ch11-streaming` |
+| 12 | 致敬工业级 Spark | `ch12-real-spark` |
+| 13 | 从 RDD 到 DataFrame | `ch13-dataframe-future` |
 
 ## 构建
 
@@ -39,7 +40,7 @@ mvn -q -pl ch01-wordcount exec:java -Dexec.mainClass=com.sparklearn.WordCount   
 
 - **第一部分（Ch1-4）**：RDD 核心——分区、惰性迭代器、流水线、血缘
 - **第二部分（Ch5-8）**：调度与 Shuffle——多线程、落盘、DAG、容错
-- **第三部分（Ch9-12）**：云端与未来——网络、缓存、真实 Spark 对照、DataFrame
+- **第三部分（Ch9-13）**：云端与未来——网络、缓存、Streaming、真实 Spark 对照、DataFrame
 
 ## 许可
 

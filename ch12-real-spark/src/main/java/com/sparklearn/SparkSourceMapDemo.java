@@ -3,7 +3,7 @@ package com.sparklearn;
 import java.util.List;
 
 /**
- * 第 11 章核心 Demo——把前 10 章手写的每个关键类，与真实 Apache Spark 源码
+ * 第 12 章核心 Demo——把前 10 章手写的每个关键类，与真实 Apache Spark 源码
  * 文件/方法逐行对照。读者能指着真实 Spark 某文件某方法，说出它对应自己
  * 第几章实现的哪个类/方法。
  *
@@ -125,7 +125,7 @@ public final class SparkSourceMapDemo {
 
     public static void print() {
         System.out.println("=".repeat(78));
-        System.out.println("第 11 章 · 致敬工业级 Spark —— 源码对照地图");
+        System.out.println("第 12 章 · 致敬工业级 Spark —— 源码对照地图");
         System.out.println("=".repeat(78));
         System.out.println();
         System.out.println("下表列出你亲手实现的每个关键类，与真实 Apache Spark 源码文件/方法的");

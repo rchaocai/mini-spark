@@ -617,5 +617,5 @@ cache 命中      -> 读内存列表
 
 到这里，`iterator()` 仍然是分区读取入口。cache 和 checkpoint 只是让这个入口在合适的时候提前返回：命中缓存时从内存返回，checkpoint 完成后从文件返回，否则继续沿血缘调用 `compute(partition)`。
 
-下一章不再加新的计算功能。我们会把这 10 章写过的类，和真实 Apache Spark 源码并排放在一起，看看工业级系统到底多了什么、又有哪些地方和你写的一模一样。
+下一章先不急着对照源码。我们会在这套已经能跑的 RDD 内核上，长出 Spark Streaming：把连续输入切成一个个 batch，让 DStream 按时间生成 RDD。
 

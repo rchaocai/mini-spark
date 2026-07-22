@@ -7,7 +7,7 @@ bookToc: false
 
 ## 写给大数据初学者的 Spark 内核课
 
-用 **Java 17 从零手写一个 mini-spark**，在亲手实现中理解 Spark 内核：RDD、惰性求值、Shuffle、Stage/DAG、容错、Cache，直至 DataFrame。不需要预先懂 Scala 或分布式——会基础 Java 就够了。
+用 **Java 17 从零手写一个 mini-spark**，在亲手实现中理解 Spark 内核：RDD、惰性求值、Shuffle、Stage/DAG、容错、Cache，直至 Streaming 与 DataFrame。不需要预先懂 Scala 或分布式——会基础 Java 就够了。
 
 [开始阅读 →]({{< relref "docs/00-preface/_index.md" >}})
 
@@ -39,8 +39,9 @@ bookToc: false
 |---|------|
 | 9 | 从单机到分布式执行 |
 | 10 | Cache 与 Checkpoint |
-| 11 | 致敬工业级 Spark |
-| 12 | 从 RDD 到 DataFrame |
+| 11 | Spark Streaming 与 DStream |
+| 12 | 致敬工业级 Spark |
+| 13 | 从 RDD 到 DataFrame |
 
 ---
 

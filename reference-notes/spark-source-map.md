@@ -1,6 +1,6 @@
 # 真实 Spark 源码对照地图
 
-> 支撑第 11 章（运行行为对照），也供各章 spec「参考对照」一节引用。
+> 支撑第 12 章（运行行为对照），也供各章 spec「参考对照」一节引用。
 > 参考工程：[apache/spark](https://github.com/apache/spark) 的 [`branch-0.5`](https://github.com/apache/spark/tree/branch-0.5) 分支（约 `v0.5.2`，早期 Apache Spark，**Scala / SBT，无 Spark SQL**）。
 > 下表「真实 Spark 文件」均相对仓库根目录（如 `core/src/main/scala/spark/RDD.scala`）。
 
@@ -35,8 +35,9 @@
 | Cache / persist | 10 | `core/src/main/scala/spark/RDD.scala`（`cache()`）、`CacheTracker.scala`、`BoundedMemoryCache.scala` | 内存缓存 + 缓存跟踪 |
 | Checkpoint（切断血缘） | 10 | （**0.5 无**；v0.7.0 起）`rdd/CheckpointRDD.scala`、`RDD.scala` | `checkpoint()`；checkpoint 后 `final def dependencies` 改指向 `CheckpointRDD`，切断血缘 |
 | RPC / 分布式通信 | 9 | `core/src/main/scala/spark/Executor.scala`、`HttpServer` | 本书 `NetworkTaskScheduler`/`Executor` 用 Java Socket；参考工程用 **Scala Actors + HTTP** |
-| DataFrame / Catalyst | 12 | （参考工程无） | 指向**现代 Spark** 的 `sql/catalyst` 模块 |
+| Streaming / DStream | 11 | （**0.5 无**；v0.7.0 起）`streaming/src/main/scala/spark/streaming/*.scala` | `StreamingContext` / `DStream` / micro-batch；DStream 每个 batch 生成 RDD |
+| DataFrame / Catalyst | 13 | （参考工程无） | 指向**现代 Spark** 的 `sql/catalyst` 模块 |
 
 ## 备注
-- 参考工程为 **RDD 时代 Spark**（无 Spark SQL）。第 9 章 RPC、第 12 章 DataFrame/Catalyst 在参考工程中**无直接对应**，需自实现或对照现代 Spark。
-- 第 11 章建议按上表逐行打开真实文件与本书实现**并排阅读**，体会「核心一模一样」。
+- 参考工程为 **RDD 时代 Spark**（无 Spark SQL）。第 9 章 RPC、第 11 章 Streaming、第 13 章 DataFrame/Catalyst 在参考工程中**无直接对应**，需自实现或对照现代 Spark。
+- 第 12 章建议按上表逐行打开真实文件与本书实现**并排阅读**，体会「核心一模一样」。
