@@ -3,7 +3,7 @@ title: "第 11 章 · Spark Streaming 与 DStream"
 weight: 3
 date: 2026-07-22
 tags: ["Streaming", "DStream", "微批", "window", "StreamingContext"]
-summary: "流计算不必另起炉灶。把连续输入按时间切成一个个小批次，每批仍是一个 RDD：DStream 是按时间排列的一串 RDD，输出操作在每个时间点提交一次普通 job，容错仍沿 RDD 血缘重算。"
+summary: "流计算不必另起炉灶。把连续输入按时间切成一个个小批次，每批仍是一个 RDD：DStream 是 RDD 的时间副本——一个时间点封装出一个 RDD，每个变换都对应同一个 RDD 变换；输出操作在每个时间点提交一次普通 job，容错仍沿 RDD 血缘重算。"
 ---
 
 # 第 11 章 · Spark Streaming 与 DStream
@@ -134,7 +134,9 @@ wordCounts.foreachRDD((rdd, time) -> {
 });
 ```
 
-`queueStream` 把队列变成输入流；`flatMap` 拆词、`map` 配成 `(词, 1)`、`reduceByKey` 汇总，最后 `foreachRDD` 把每个 batch 的结果打出来。这些变换的返回值都是新的 `DStream`，不是立刻算出来的数据——惰性这一点，和 RDD 如出一辙。
+逐行看返回类型：`queueStream` 给回一个 `DStream<String>`；`flatMap` 拆词，给回新的 `DStream<String>`；`map` 把每个词配成 `(词, 1)`，给回 `DStream<KeyValuePair<String,Integer>>`；`reduceByKey` 按词汇总，又给回一个 `DStream`；最后 `foreachRDD` 登记一段"每个 batch 要执行的打印"。
+
+注意每一行的返回值都是 `DStream`，没有一行是算出来的数据。这些调用只是在搭一条"流上的血缘"——和第 1 章 `rdd.map(...).filter(...)` 只搭血缘不算数据，是同样的惰性。数据要等时间往前走、由输出操作触发才算（11.6 展开）。
 
 跑起来，WordCount 这条流在前两个 batch 的输出长这样（另一条 window 支线的输出，先略过）：
 
@@ -158,15 +160,85 @@ streaming -> 1
 
 最重要的不是词频，而是那条**时间轴**。每个 batch 都有一个逻辑时间点：`Time(1000)`、`Time(2000)`、`Time(3000)`。时间每往前走一格，就有一个新的 RDD 被收拢出来，对它跑一次熟悉的 job。
 
-注意那行 `jobs=2`：每个 batch 其实提交了**两个** job。一个是这里的 WordCount，另一个是同时挂着的一条 window 支线（最近 2 秒的词频）。它先放一放，11.6 再说。
+注意那行 `jobs=2`：每个 batch 其实提交了**两个** job。一个是这里的 WordCount，另一个是同时挂着的一条 window 支线（最近 2 秒的词频）。它先放一放，11.7 再说。
 
 这里没有任何新的 `collect`，也没有新发明的执行引擎。流计算做的事，只是每隔一个 batch 间隔，把你已经写过的那个 job，在新到的数据上再提交一次。
 
-## 11.4 三个对象：Time、DStream、StreamingContext
+## 11.4 DStream 与 RDD：时间轴上的一一对应
 
-跑过一遍之后，那三个反复出现的对象就好讲了。
+跑过一遍，现在退一步，把"DStream 到底是什么"一次说清——这决定了后面所有机制能不能看懂。
 
-### 11.4.1 Time 与 Duration：一条逻辑时间轴
+![DStream 把 RDD 沿时间轴推开的概念图](/mini-spark/images/ch11/dstream-rdd-time-axis.png)
+
+*图 11-1：DStream 把 RDD 沿时间轴推开——一个 DStream 是按时间排好的一串 RDD，每个时间点上的变换对应同一个 RDD 变换。*
+
+### 11.4.1 一个 DStream 节点，每个时间点交出一个 RDD
+
+`DStream` 自己不存数据，它存的是一条描述：**在任何一个时间点 `Time` 上，怎么得到一个 RDD**。给它一个 `Time`，它按描述交回一个 `RDD`；给下一个 `Time`，再交回另一个。
+
+所以 DStream 与 RDD 的关系，准确说不是"一个 DStream 等于一个 RDD"。一个 DStream 是**一串**按时间排好的 RDD，时间每走一格多一个。"一一对应"指的是两个层面上的对应：
+
+```text
+每个时间点上：   一个 DStream 节点  ↔  一个 RDD
+每种变换上：     一个 DStream 变换  ↔  同一个 RDD 变换（在每个时间点上各做一次）
+```
+
+可以把 DStream 看成把 RDD 推广到了时间轴上：RDD 是一个静止的数据集，DStream 是"同一套数据集、同一个变换结构，只是时间每走一格就重新产出一份"。前面 10 章对 RDD 说过的那些话——惰性、血缘、沿血缘重算——因此能整批搬过来。
+
+### 11.4.2 模板与实例：两张同构的图
+
+这条描述有一个直接后果。演示里 WordCount 这条流搭出五个 DStream 节点，它们之间的连接是**静态的**：不管时间走到哪，节点和连接关系都不变，像一张模板。时间走到 `Time(1000)` 时，按这张模板"印"一遍，每个节点各交出一个 RDD，就得到一条专属于这个 batch 的 RDD 血缘：
+
+```mermaid
+flowchart TB
+    subgraph DS["DStream 图（模板：每个时间点怎么造 / 用 RDD）"]
+        direction LR
+        D1[QueueInputDStream] --> D2[FlatMappedDStream] --> D3[MappedDStream] --> D4[ReducedDStream] --> D5["ForEachDStream（输出）"]
+    end
+    subgraph RDD["Time(1000)：按模板印出一条 RDD 血缘"]
+        direction LR
+        R1["输入 RDD"] --> R2["flatMap"] --> R3["map"] --> R4["reduceByKey"] --> R5["collect（action）"]
+    end
+    D1 -.-> R1
+    D2 -.-> R2
+    D3 -.-> R3
+    D4 -.-> R4
+    D5 -.-> R5
+```
+
+图里每个虚线箭头读作"这个 DStream 节点，在这个 batch 里兑现成下面对应的那个 RDD 操作"。`Time(2000)` 再印一遍，又得到一条形状相同、数据不同的 RDD 血缘。**DStream 图是模板，每个 batch 的 RDD 图是它的实例；两者同构。**
+
+### 11.4.3 对应表：每个变换都是同一个 RDD 变换
+
+模板能这么整齐地印出来，是因为每个 DStream 变换，对应的就是同一个 RDD 变换，只是"每个时间点都做一遍"。这张表把一一对应列清楚：
+
+| DStream 节点 | 每个 batch 里对父 RDD 做的事 | RDD 层对应 |
+|---|---|---|
+| `QueueInputDStream`（输入） | 从队列取这个 batch 的数据，成一个 RDD | 数据源 |
+| `FlatMappedDStream` | 对父 batch 的 RDD 调 `flatMap(f)` | `rdd.flatMap` |
+| `MappedDStream` | 对父 batch 的 RDD 调 `map(f)` | `rdd.map` |
+| `FilteredDStream` | 对父 batch 的 RDD 调 `filter(p)` | `rdd.filter` |
+| `ReducedDStream` | 对父 batch 的 RDD 调 `reduceByKey(...)` | `rdd.reduceByKey` |
+| `WindowedDStream` | 把父流**多个** batch 的 RDD 并成一个 `UnionRDD` | 多个 RDD `union` |
+| `ForEachDStream`（输出） | 对最末端 RDD 跑一次 action | `collect` 等 action |
+
+表里有两处要看清，它们是"对应"的边界，不是反例。其一，前六行每个节点都**造**一个 RDD，唯独输出流 `ForEachDStream` 不造——它的 `compute` 返回空，对应的是一个 **action**，负责把最末端那个 RDD 真正算出来。其二，前几行只吃父流**同一个**时间点的 RDD，`WindowedDStream` 却吃父流**多个**时间点的 RDD（它要跨好几个 batch）。这两处都不改"模板印实例"的整体形状，只说明在输出和窗口这两类节点上，DStream 对应的分别是 action 和跨时间段的 union。
+
+### 11.4.4 这层对应带来的
+
+把 DStream 想成"RDD 的时间副本"，前面 10 章攒下的东西就整批搬过来了：
+
+- **惰性**：DStream 变换只搭模板，不算数据——和 `rdd.map` 一样。
+- **血缘**：模板本身就是一张依赖图，丢了某个 batch 的 RDD，沿它重算。
+- **容错**：既然每个 batch 的状态就是一个 RDD，第 8 章的重算、第 10 章的 cache/checkpoint，原样可用。
+
+DStream 没有新造一套引擎。它只是把"一个 RDD 变换"封装成"每个时间点都做一次这个变换"，再在外面加一个按时间推进的驱动器去触发。余下几节，就看这个驱动器和这套封装怎么动起来。
+
+## 11.5 三个零件：Time、DStream 的内部、StreamingContext
+
+11.4 讲清了 DStream 是什么。这一节拆开三个具体对象：时间怎么表示、DStream 内部怎么把"造 RDD"做实、谁来按时间驱动。
+
+### 11.5.1 Time 与 Duration：一条逻辑时间轴
 
 `Duration` 是一段时间长度，`Time` 是一个时间点。它们的实现朴素到几乎没有东西：
 
@@ -195,9 +267,11 @@ zeroTime       = Time(0)
 
 为什么要这样？因为"什么时候该往前走一格"和"走到这一格要算什么"，是两件最好分开的事。把它们解耦之后，业务逻辑（算词频）只认逻辑时间点，不认墙钟：想要每秒走一格，就在外面挂一个定时器去调 `advance()`；想要在测试里精确控制，就手动一格一格拨。同一个计算图，两种推进方式都能用。
 
-### 11.4.2 DStream：一串 RDD 的描述
+### 11.5.2 DStream 内部：compute 与 getOrCompute
 
-`DStream` 是"离散化流"在代码里的样子。它本身不存数据，只描述"在每个时间点上，如何得到一个 RDD"。它要求子类实现三件事：
+11.4 说 DStream 存的是"每个时间点怎么造一个 RDD"。落到代码上，这条描述由两个方法承担：`compute` 写"怎么造"，`getOrCompute` 在外面加一层"同一个时间点别造两遍"。
+
+`DStream` 要求子类实现三件事：
 
 ```java
 public abstract class DStream<T> implements Serializable {
@@ -211,15 +285,24 @@ public abstract class DStream<T> implements Serializable {
 }
 ```
 
-输入流（`InputDStream`）没有父流，自己在每个 batch 产生数据，比如演示里的 `QueueInputDStream` 每次从队列里取一个 RDD。其余的变换流都挂在一个父流上：`compute()` 通常就是"问父流要这个时间点的 RDD，再对它套一层 `map`/`filter`/`reduceByKey`"。
+`slideDuration` 是每隔多久造一个 RDD；`dependencies` 说出父流（11.4.2 模板里的上游节点）；`compute` 就是"怎么造"那条描述本体。看一个最朴素的例子，`MappedDStream` 的 `compute`：
 
-为了避免同一个时间点的 RDD 被反复算，`DStream` 还提供 `getOrCompute(time)`：先查自己已经算过的，没有才算，算完留一份。
+```java
+public Optional<RDD<U>> compute(Time validTime) {
+    return parent.getOrCompute(validTime)
+            .map(rdd -> rdd.map(mapFunc));
+}
+```
+
+读出来正是 11.4.3 对应表里那行："问父流要这个时间点的 RDD，再对它调一次 `map`。" 其余 `FlatMappedDStream`、`FilteredDStream`、`ReducedDStream` 把 `map` 换成 `flatMap`/`filter`/`reduceByKey`，形状一模一样。输入流 `QueueInputDStream` 没有父流，`compute` 不往上问，自己从队列里取数据。每个变换流，就只是 11.4 说的"同一个 RDD 变换，在这个时间点上做一次"。
+
+`compute` 只是"怎么造"，真正被调用的入口是 `getOrCompute`——它在 `compute` 外面套了一层缓存：
 
 ```java
 public final Optional<RDD<T>> getOrCompute(Time time) {
     RDD<T> cached = generatedRdds.get(time);
     if (cached != null) {
-        return Optional.of(cached);          // 这个时间点已经算过了
+        return Optional.of(cached);          // 这个时间点已经造过了，直接给
     }
     if (!isTimeValid(time)) {
         return Optional.empty();
@@ -229,16 +312,22 @@ public final Optional<RDD<T>> getOrCompute(Time time) {
         return Optional.empty();
     }
     RDD<T> rdd = computed.get();
-    generatedRdds.put(time, rdd);            // 留下来，下次直接拿
+    generatedRdds.put(time, rdd);            // 造好的留下来
     return Optional.of(rdd);
 }
 ```
 
-这一小段，正是 11.2 里"每个时间点的状态是确定的"在代码里的兑现：同一个 `time`，`compute` 跑多少遍结果都一样，所以敢于把结果存起来复用。
+逐段读：
 
-`map`、`filter`、`flatMap`、`reduceByKey`、`window` 这些变换，返回的都还是 `DStream`，不是数据。它们只负责把"如何从父流得到这个时间点的 RDD"这条规则，再往下接一段。惰性这一点，和 RDD 完全同构。
+- 先查 `generatedRdds`——这个时间点造过没有？造过就把那个 RDD 直接还回去，不再调 `compute`。
+- 没造过，看时间合不合法（`isTimeValid`）；不合法（比如还没到，或不是 batch 边界）就返回空。
+- 合法才调 `compute` 真造一个，造完存进 `generatedRdds`，下次同时间点来要就直接给。
 
-### 11.4.3 StreamingContext：那层时间驱动器
+这层缓存，正是 11.4.1"一个时间点一个 RDD"在代码里的兑现：同一个 `Time`，`compute` 跑多少遍结果都一样（它只搭惰性血缘），所以敢把第一次造好的存下来复用。后面 window 要回头用旧 batch 的 RDD（11.7），靠的就是这层"造过就留下"。
+
+`map`、`filter`、`flatMap`、`reduceByKey`、`window` 这些方法，返回的都还是 `DStream`——它们各自 `new` 一个上面对应的子类，把自己传进去当父流。这和 `rdd.map` 返回新 `RDD` 而不算数据，完全同构。
+
+### 11.5.3 StreamingContext：那层时间驱动器
 
 `StreamingContext` 站在 `SparkContext` 之上。`SparkContext` 负责跑一个 RDD job；`StreamingContext` 负责按时间反复地提交 job。
 
@@ -286,9 +375,9 @@ sequenceDiagram
 
 实现上，这些类分成两组包：`com.sparklearn.core` 里是"算一个 RDD"的那套（RDD、Dependency、DAGScheduler、Task、Shuffle、cache……），`com.sparklearn.streaming` 里是"按时间生成一串 RDD"的这层。看到一个类，先判断它属于哪一组，就能定位它的职责。
 
-## 11.5 一条流怎么变成 job
+## 11.6 一条流怎么变成 job
 
-`advance()` 里那句 `generateJobs` 看着轻飘飘，它到底怎么把一条流变成可执行的 job？以 WordCount 为例，演示里这条流的血缘长这样：
+`advance()` 里那句 `generateJobs` 看着轻飘飘。它到底怎么把一条流变成可执行的 job？以 WordCount 为例，这条流的血缘是：
 
 ```mermaid
 flowchart LR
@@ -298,9 +387,13 @@ flowchart LR
     R --> FE[ForEachDStream<br/>输出流]
 ```
 
-变换流都是惰性的——它们只是把这条血缘接起来，什么都没算。真正扣扳机的，是最右边的输出流。
+血缘上的五个 DStream 都是惰性的——`flatMap`、`map`、`reduceByKey` 只把变换规则接好，数据一条没算。要有一个节点去推它们。
 
-时间走到 `Time(1000)` 时，`DStreamGraph` 会调用每个输出流的 `generateJob(time)`。输出流是 `ForEachDStream`，它的实现是：
+### 11.6.1 输出流扣扳机：generateJob 拆开读
+
+这个推手是输出流。11.3 里那句 `wordCounts.foreachRDD(...)`，`foreachRDD` 做两件事：把传入的回调包成一个 `ForEachDStream`，再把它登记进 `StreamingContext` 的输出流列表 `outputStreams`。于是血缘最右端的 `ForEachDStream`，是唯一登记成"要执行"的节点。`advance()` 拨到 `Time(1000)` 后，对 `outputStreams` 里每个流调一次 `generateJob(time)`——其余四个变换流不会被直接调用，它们是被 `ForEachDStream` 顺带拉起来的。
+
+`ForEachDStream.generateJob` 全文就一行，但信息很密：
 
 ```java
 public Optional<StreamingJob> generateJob(Time time) {
@@ -309,20 +402,31 @@ public Optional<StreamingJob> generateJob(Time time) {
 }
 ```
 
-它先问父流（`ReducedDStream`）要这个时间点的 RDD。这一问，会沿着血缘一路追溯上去：
+拆成三块读：
 
-```text
-ForEachDStream.generateJob(1000)
-  → parent.getOrCompute(1000)            // ReducedDStream
-      → ReducedDStream.compute(1000)
-          → parent.getOrCompute(1000)    // MappedDStream
-              → … 直到 QueueInputDStream 取出 batch1
-          → 对父 RDD 调 reduceByKey(...)
-  → 拿到这个 batch 的 wordCounts RDD
-  → job 的 body = 一段对它执行副作用的回调
+- `parent`——这个输出流的父流。WordCount 这条血缘里，`ForEachDStream` 的父流是 `ReducedDStream`。
+- `parent.getOrCompute(time)`——11.5.2 见过的"要这个时间点的 RDD，没有就算一个"。这一句是关键：它把父流、父流的父流……一路拉起来，递归地搭出这个 batch 的 RDD。下一小节跟着它走一遍。
+- `.map(rdd -> new StreamingJob(...))`——这个 `map` 是 `Optional.map`，不是算数据的 `map`；它只是把父流给回的 RDD（若存在）包进一个 `StreamingJob`。
+
+再看包出来的那个 `StreamingJob`：
+
+```java
+new StreamingJob(time, () -> foreachFunc.accept(rdd, time))
 ```
 
-`ReducedDStream.compute` 的内容，印证了"变换流就是问父流要 RDD 再套一层"：
+两个参数：一个 `Time`，一个 `Runnable`。第二个参数 `() -> foreachFunc.accept(rdd, time)` 是 job 的 body，一段"被调到才跑"的回调；`foreachFunc` 正是 11.3 里 `foreachRDD((rdd, time) -> {...})` 传进来的那段——收集并打印词频。
+
+要紧的是这个 `rdd`。它是 `parent.getOrCompute(time)` 拿回来的结果，而 `getOrCompute` 返回它之前已经把整条血缘递归跑完——所以这个 `rdd` 是"对第一个 batch 的数据，套好 flatMap → map → reduceByKey 之后的 RDD 血缘"。注意是血缘，不是算出来的结果：`reduceByKey` 仍是惰性的，数据还没动。
+
+`generateJob` 交回去的，因此是一个装着"未来某刻执行 `foreachFunc`"的 job。真正执行，要等 `advance()` 里那句 `job.run()`。
+
+### 11.6.2 跟着 getOrCompute 递归一遍
+
+`generateJob` 的核心是 `parent.getOrCompute(time)`。沿血缘往上走，看一个 batch 的 RDD 如何一步步搭起来。从 `ForEachDStream` 起步：
+
+**`ForEachDStream.generateJob(1000)`** 调 `parent.getOrCompute(1000)`，`parent` 是 `ReducedDStream`。
+
+**`ReducedDStream`** 发现自己没存过 `Time(1000)` 的 RDD，调 `compute(1000)`：
 
 ```java
 public Optional<RDD<KeyValuePair<K, V>>> compute(Time validTime) {
@@ -331,25 +435,52 @@ public Optional<RDD<KeyValuePair<K, V>>> compute(Time validTime) {
 }
 ```
 
-于是，**输出操作才是扳机**。这一点和 RDD 世界完全同构：
+`compute` 又是"问父流要 RDD，再套一层"——这里再次出现 `parent.getOrCompute`，递归往上抛一层。`ReducedDStream` 的父流是 `MappedDStream`。
+
+**`MappedDStream`** 照样问父流要 RDD、套 `map`，父流是 `FlatMappedDStream`。**`FlatMappedDStream`** 问父流要 RDD、套 `flatMap`，父流是 `QueueInputDStream`。
+
+**`QueueInputDStream`** 是输入流，`dependencies()` 为空，`compute` 不再往上问，而是自己取数据——从队列里拿出第一个 RDD，即 batch1：`"hello spark"`、`"hello stream"`。
+
+触底。递归一层层往回收：batch1 的 RDD 往上传，`FlatMappedDStream` 套 `flatMap`、`MappedDStream` 套 `map`、`ReducedDStream` 套 `reduceByKey`。每层套上去的都是一条惰性的 RDD 变换，只把血缘接长一段，数据仍未计算。
+
+收回到 `ForEachDStream` 时，`getOrCompute(1000)` 手里攥着的，是一条专属于 `Time(1000)` 的完整 RDD 血缘：`batch1 → flatMap → map → reduceByKey`。它同时被存进沿途各变换流的 `generatedRdds`，同一个时间点再来要，直接给回这条缓存好的血缘。
+
+### 11.6.3 两个阶段：先搭血缘，再执行
+
+把前两节合起来，一个 batch 分两步：
+
+```text
+① generateJob：getOrCompute 递归，把这个 batch 的 RDD 血缘搭好（惰性，数据没动）
+② job.run()：foreachFunc 执行 → rdd.collect() → 走第 7 章的 DAGScheduler，算出结果
+```
+
+这一推一收，就是 11.4.2"模板印实例"的一次具体发生：`ForEachDStream` 扳机一扣，五个 DStream 节点各自把对应的 RDD 操作兑现，串成这条 batch 专属的血缘。
+
+第 ② 步里的 `collect()`，就是第 1 章用过的那个 action：照样经过 `DAGScheduler`、照样切 Stage、照样分发 Task。一个流式 job，骨子里就是一个普通的 Spark job，只不过它被一个按时间推进的循环反复提交。
+
+这一点和 RDD 同构：
 
 ```text
 RDD:     transform 惰性，action 触发
 DStream: transform 惰性，output operation 触发
 ```
 
-而每个被触发出来的 `StreamingJob`，body 里装的就是对那个 batch 的 RDD 跑一次普通 Spark action（演示里是 `collect`）。它照样经过第 7 章的 `DAGScheduler`、照样切 Stage、照样分发 Task。换句话说，一个流式 job，骨子里就是一个普通的 Spark job，只不过它被一个按时间推进的循环，反复地提交。
+区别只在"触发"的形式：RDD 是程序里显式调一次 action；DStream 是时间每走一格，输出流自动提交一次 job。
 
 > [!INFO]
 > **为什么说结果是"恰好一次"的**
 >
 > 离散化还顺带送了一个干净的性质。因为时间被切成一段段互不重叠的间隔，每个间隔的输出 RDD，反映的是到这个间隔为止的全部输入；不同间隔的数据集又各有各的身份（不同的 `Time`）。所以哪怕各个节点算得有快有慢，最终每个时间点的结果，都等价于所有 batch 排好队、一步不差地锁步跑出来的结果——这就是所谓的"恰好一次（exactly-once）"处理语义。常驻算子模型要做到这一点，反而得专门加同步。
 
-## 11.6 window：跨 batch 复用 RDD
+## 11.7 window：跨 batch 复用 RDD
 
-单 batch 的 WordCount 还不太"流"。流计算里更常见的需求是：不是只看这一秒，而是看**最近 N 秒**。
+单 batch 的 WordCount 还不太"流"。流计算里更常见的需求：不是只看这一秒，而是看**最近 N 秒**。
 
-`window(windowDuration, slideDuration)` 做的事直截了当：把父流最近若干个 batch 的 RDD 取出来，拼成一个大 RDD，再继续往下算。它的 `compute` 是这么写的：
+### 11.7.1 window 做的事：把最近几个 batch 并起来
+
+`window(windowDuration, slideDuration)` 把父流最近若干个 batch 的 RDD 取出来，并成一个大 RDD，再继续往下算。回到 11.4.3 的对应表，它对应的是"多个 RDD `union`"。
+
+它的 `compute`：
 
 ```java
 public Optional<RDD<T>> compute(Time validTime) {
@@ -368,17 +499,25 @@ public Optional<RDD<T>> compute(Time validTime) {
 }
 ```
 
-`slice` 沿着时间轴，把窗口覆盖的每个 batch 的 RDD 要过来；`UnionRDD` 把它们并成一个 RDD，后面的 `map`/`reduceByKey` 就在并起来的数据上继续算。
+逐段读：
 
-演示里设的是 2 秒窗口、1 秒滑动。于是每个时间点的窗口里，装着最近的两个 batch：
+- 先算窗口左边界 `from`：从 `validTime` 往回退一个 `windowDuration`，再前进一个滑动步长，得到窗口覆盖的最早那个 batch 的时间点。窗口右闭，含 `validTime` 自己。
+- `parent.slice(from, validTime)` 沿时间轴，把这个区间内每个 batch 的 RDD 都要过来——每个都走 11.5.2 的 `getOrCompute`。这正是 11.4.3 指出的那个特殊性：window 不止吃父流同一个时间点的 RDD，而是一口气吃好几个 batch 的。
+- 只要到一个，直接还它；要到多个，用 `UnionRDD` 把它们的分区拼成一个 RDD。`UnionRDD` 的做法很直白：把各个 RDD 的分区依次接起来，算的时候各算各的。
+
+后面的 `map`/`reduceByKey` 就在这个并起来的 RDD 上继续算——和单 batch 时一样，只不过数据多了几批。
+
+### 11.7.2 看真实输出
+
+演示设的是 2 秒窗口、1 秒滑动。每个时间点的窗口里，装着最近的两个 batch：
 
 ```text
-Time(1000): 只有 batch1
+Time(1000): 只有 batch1        （再往前 Time(0) 不是合法 batch）
 Time(2000): batch1 + batch2
 Time(3000): batch2 + batch3
 ```
 
-把 window 那条支线的真实输出拎出来看（已按词排序）：
+window 这条支线的真实输出（已按词排序）：
 
 ```text
 [window 2s] @Time(1000)
@@ -399,13 +538,15 @@ spark -> 3
 streaming -> 2
 ```
 
-`Time(2000)` 的窗口里装着 batch1 和 batch2，所以 `hello` 是 2+1=3、`spark` 是 1+2=3，正好是两个 batch 各自结果的加总。`Time(3000)` 窗口滑到 batch2+batch3，batch1 滑出去了，`hello` 只剩 batch2 里的 1。
+`Time(2000)` 的窗口装着 batch1 和 batch2，所以 `hello` 是 2+1=3、`spark` 是 1+2=3，正好是两批各自结果的加总。`Time(3000)` 窗口滑到 batch2+batch3，batch1 滑出去了，`hello` 只剩 batch2 里的 1。
 
-这里有个细节：窗口要复用过去的 batch，可那些 RDD 算过一次不就该没了吗？这就是 `WindowedDStream` 构造时那句 `parent.cache()` 的用处——它把父流标记成缓存的，于是 `slice` 再次要同一个时间点的 RDD 时，`getOrCompute` 直接返回之前算好的那份，不会重算。窗口复用历史 RDD，靠的就是 11.4.2 那层"算过就留下"的缓存。
+### 11.7.3 复用旧 batch：靠 cache
 
-这种"并起来再整体算"的窗口，每次都要把整个窗口重算一遍，窗口越大重复的功越多。离散化模型在这里还留了一条更省的路：既然每个 batch 的部分结果都是一个不可变的 RDD，那滚动窗口时，完全可以**只加上新进来那一段的结果，减去滑出去那一段的结果**，不必每次从头加总。这需要一个"可逆"的汇总函数（既能加也能减）。这条增量计算的路线，模型上是通的，留给你以后在更大的窗口上体会它的好处。
+这里有个问题：窗口要复用过去的 batch，可那些 RDD 算过一次不就该没了吗？这就是 `WindowedDStream` 构造时那句 `parent.cache()` 的用处。它把父流标记成缓存的，于是 `slice` 再次要同一个时间点的 RDD 时，`getOrCompute` 直接返回 11.5.2 存下的那份，不重算。窗口复用历史 RDD，靠的就是那层"造过就留下"。
 
-## 11.7 容错：为什么还是第 8/10 章那套
+这种"并起来再整体算"的窗口，每次都要把整个窗口重算一遍，窗口越大重复的功越多。离散化模型在这里还留了一条更省的路：既然每个 batch 的部分结果都是一个不可变的 RDD，滚动窗口时完全可以**只加上新进来那一段的结果，减去滑出去那一段的结果**，不必每次从头加总。这需要一个"可逆"的汇总函数（既能加也能减）。这条增量计算的路线，模型上是通的，留到更大的窗口上体会它的好处。
+
+## 11.8 容错：为什么还是第 8/10 章那套
 
 离散化最有力的回报，不在 API，而在容错。
 
@@ -449,7 +590,7 @@ flowchart LR
 >
 > 流计算要 7×24 小时跑，光重算 Worker 还不够。一是**驱动节点自己也会坏**：恢复时，新驱动读回图的元数据和"算到哪个时间点"，重新接上；因为计算是确定性的，某个 RDD 被算了两遍也无妨，结果一样。二是**血缘会一直长**：每个 batch 都新增一层 RDD，不截断就会无限膨胀。办法和第 10 章一样——定期把状态 RDD checkpoint 到可靠存储，然后**忘掉 checkpoint 之前的血缘**，让它不再增长。这两点都建立在"状态即 RDD、可沿血缘重算"这个前提上。
 
-## 11.8 一处统一：流与批共用同一套 RDD
+## 11.9 一处统一：流与批共用同一套 RDD
 
 离散化还有个不那么显眼、但实际里非常值钱的好处。
 
@@ -463,15 +604,15 @@ D-Stream 用的是和批处理**同一套模型、同一套数据结构（RDD）
 
 回头看开头那个问题：前 10 章的 RDD 内核，能不能也处理持续到来的数据？答案是——不仅能，而且流计算本来就长在这套内核上：没有新造一台引擎，只是把那层"按时间推进"的驱动器，接了上去。
 
-## 11.9 本章小结
+## 11.10 本章小结
 
 流计算没有另起炉灶。
 
-把连续到来的数据，按时间切成一个个小批次；每个批次收成一个 RDD；`DStream` 描述这些 RDD 随时间如何演化；输出操作在每个时间点上，提交一次普通的 Spark job。这就是离散化流的全部形状。
+把连续到来的数据，按时间切成一个个小批次；每个批次收成一个 RDD。`DStream` 是这些 RDD 的时间副本——一个时间点封装出一个 RDD，每一个变换都对应同一个 RDD 变换，于是前 10 章的惰性、血缘、容错整批搬过来。输出操作在每个时间点上，提交一次普通的 Spark job。这就是离散化流的全部形状。
 
 ```text
 输入按 batch 切开 → 每个 batch 变成一个 RDD
-DStream 描述 RDD 随时间如何演化
+DStream = RDD 的时间副本：一个 Time 一个 RDD，一个变换对应一个 RDD 变换
 output operation 在每个 Time 上提交普通 job
 ```
 
