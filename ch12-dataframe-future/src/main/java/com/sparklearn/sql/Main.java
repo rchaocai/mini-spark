@@ -7,7 +7,7 @@ import java.util.List;
 import static com.sparklearn.sql.catalyst.expressions.Expressions.col;
 
 /**
- * 第 13 章 · 从 RDD 到 DataFrame 演示入口。
+ * 第 12 章 · 从 RDD 到 DataFrame 演示入口。
  */
 public final class Main {
 
@@ -16,7 +16,7 @@ public final class Main {
 
     public static void main(String[] args) {
         System.out.println("=".repeat(72));
-        System.out.println("第 13 章 · 从 RDD 到 DataFrame");
+        System.out.println("第 12 章 · 从 RDD 到 DataFrame");
         System.out.println("=".repeat(72));
 
         try (SparkContext spark = new SparkContext(2, true)) {

@@ -8,9 +8,9 @@
     <artifactId>spark-java-book</artifactId>
     <version>0.1-SNAPSHOT</version>
   </parent>
-  <artifactId>ch13-dataframe-future</artifactId>
-  <name>第 13 章 · 从 RDD 到 DataFrame</name>
-  <description>《手写 mini-Spark》第 13 章代码快照：在 RDD 内核上实现教学版 DataFrame 与 Catalyst。</description>
+  <artifactId>ch12-dataframe-future</artifactId>
+  <name>第 12 章 · 从 RDD 到 DataFrame</name>
+  <description>《手写 mini-Spark》第 12 章代码快照：在 RDD 内核上实现教学版 DataFrame 与 Catalyst。</description>
 
   <dependencies>
     <dependency>

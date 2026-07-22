@@ -19,8 +19,8 @@
 | 9 | 从单机到分布式执行 | `ch09-network-rpc` |
 | 10 | Cache 与 Checkpoint | `ch10-cache-checkpoint` |
 | 11 | Spark Streaming 与 DStream | `ch11-streaming` |
-| 12 | 致敬工业级 Spark | `ch12-real-spark` |
-| 13 | 从 RDD 到 DataFrame | `ch13-dataframe-future` |
+| 12 | 从 RDD 到 DataFrame | `ch12-dataframe-future` |
+| 13 | 致敬工业级 Spark | `ch13-real-spark` |
 
 ## 构建
 
@@ -40,7 +40,7 @@ mvn -q -pl ch01-wordcount exec:java -Dexec.mainClass=com.sparklearn.WordCount   
 
 - **第一部分（Ch1-4）**：RDD 核心——分区、惰性迭代器、流水线、血缘
 - **第二部分（Ch5-8）**：调度与 Shuffle——多线程、落盘、DAG、容错
-- **第三部分（Ch9-13）**：云端与未来——网络、缓存、Streaming、真实 Spark 对照、DataFrame
+- **第三部分（Ch9-13）**：云端与未来——网络、缓存、Streaming、DataFrame、真实 Spark 对照
 
 ## 许可
 

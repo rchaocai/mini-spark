@@ -627,4 +627,4 @@ core       会算一个 RDD
 streaming  会按时间反复地算
 ```
 
-下一章，把前 10 章写过的内核、这一章的 Streaming，和成熟的工业级实现并排放在一起，做一次总对照。
+下一章先往上走一层：在这套 RDD 内核上盖出 DataFrame 和 Catalyst。到那里你会看到，SQL 看起来离 RDD 很远，真正执行时仍然会落回这一套分区、血缘、Stage 和 Shuffle。

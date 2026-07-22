@@ -1,4 +1,4 @@
-# 第 13 章 · 从 RDD 到 DataFrame
+# 第 12 章 · 从 RDD 到 DataFrame
 
 本章在第 11 章拆开的 RDD 内核之上，加一个教学版 Spark SQL / DataFrame 层。
 
@@ -22,12 +22,12 @@ com.sparklearn.sql.execution.*          # 物理计划，把逻辑计划落回 R
 运行：
 
 ```bash
-mvn -pl ch13-dataframe-future package
-java -Dfile.encoding=UTF-8 -cp ch13-dataframe-future/target/classes com.sparklearn.sql.Main
+mvn -pl ch12-dataframe-future package
+java -Dfile.encoding=UTF-8 -cp ch12-dataframe-future/target/classes com.sparklearn.sql.Main
 ```
 
 运行测试：
 
 ```bash
-mvn -pl ch13-dataframe-future test
+mvn -pl ch12-dataframe-future test
 ```

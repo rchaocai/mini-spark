@@ -8,9 +8,9 @@
     <artifactId>spark-java-book</artifactId>
     <version>0.1-SNAPSHOT</version>
   </parent>
-  <artifactId>ch12-real-spark</artifactId>
-  <name>第 12 章 · 致敬工业级 Spark</name>
-  <description>《手写 mini-Spark》第 12 章代码快照：对照真实 Spark 源码祛魅。</description>
+  <artifactId>ch13-real-spark</artifactId>
+  <name>第 13 章 · 致敬工业级 Spark</name>
+  <description>《手写 mini-Spark》第 13 章代码快照：对照真实 Spark 源码祛魅。</description>
 
   <dependencies>
     <dependency>

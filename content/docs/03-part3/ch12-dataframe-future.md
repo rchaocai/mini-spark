@@ -1,27 +1,27 @@
 ---
-title: "第 13 章 · 从 RDD 到 DataFrame"
-weight: 5
+title: "第 12 章 · 从 RDD 到 DataFrame"
+weight: 4
 date: 2026-07-22
 tags: ["Spark SQL", "DataFrame", "Catalyst", "逻辑计划", "物理计划", "RDD"]
 summary: "RDD 是执行底座，但工业界日常更常写 SQL 和 DataFrame。在 mini-spark 的 RDD 内核上加一层结构化查询：DataFrame 只保存惰性逻辑计划，Catalyst 用规则改写这棵树，物理计划再落回 RDD、Stage、Shuffle。"
 ---
 
-# 第 13 章 · 从 RDD 到 DataFrame
+# 第 12 章 · 从 RDD 到 DataFrame
 
-> 💻 本章完整代码：[GitHub 查看](https://github.com/rchaocai/mini-spark/tree/main/ch13-dataframe-future)
+> 💻 本章完整代码：[GitHub 查看](https://github.com/rchaocai/mini-spark/tree/main/ch12-dataframe-future)
 >
-> 构建运行：`mvn -pl ch13-dataframe-future package`
+> 构建运行：`mvn -pl ch12-dataframe-future package`
 >
-> 运行示例：`java -Dfile.encoding=UTF-8 -cp ch13-dataframe-future/target/classes com.sparklearn.sql.Main`
+> 运行示例：`java -Dfile.encoding=UTF-8 -cp ch12-dataframe-future/target/classes com.sparklearn.sql.Main`
 
-前 12 章，你已经写过一套能跑的 RDD 内核，也把它和工业级 Spark 的 RDD 时代源码对照过。
-
-如果只看底层，这条路已经闭环：
+前 11 章，你已经写过一套能跑的 RDD 内核：
 
 ```text
 RDD / Dependency / Stage / Task
 Shuffle / cache / checkpoint / Streaming
 ```
+
+如果只看执行底座，这条路已经闭环。
 
 但你去看今天日常业务里的 Spark 代码，最常见的往往不是：
 
@@ -56,7 +56,7 @@ employees
 
 不是。
 
-最后一层关系是：**RDD 是执行底座，DataFrame / SQL 是建在底座上的声明式查询层。**
+更上面的一层关系是：**RDD 是执行底座，DataFrame / SQL 是建在底座上的声明式查询层。**
 
 用户不再直接告诉系统“先 map 再 filter 再 shuffle”，而是描述“我要哪些列、过滤哪些行、按什么分组”。系统先把这段描述保存成一棵树，再用优化器改写它，最后把改写后的树翻译回你熟悉的 RDD 变换。
 
@@ -80,7 +80,7 @@ flowchart LR
 
 跑通这条路径以后，`spark.sql()` 和 `df.groupBy()` 就不再是黑箱。
 
-## 13.1 为什么 RDD 还不够
+## 12.1 为什么 RDD 还不够
 
 先看同一个需求：
 
@@ -154,13 +154,13 @@ count(*)
 于是系统能替你优化
 ```
 
-## 13.2 先跑起来：一条 DataFrame 查询
+## 12.2 先跑起来：一条 DataFrame 查询
 
 先把代码跑起来：
 
 ```bash
-mvn -pl ch13-dataframe-future package
-java -Dfile.encoding=UTF-8 -cp ch13-dataframe-future/target/classes com.sparklearn.sql.Main
+mvn -pl ch12-dataframe-future package
+java -Dfile.encoding=UTF-8 -cp ch12-dataframe-future/target/classes com.sparklearn.sql.Main
 ```
 
 第一个查询长这样：
@@ -247,7 +247,7 @@ ResultStage 0 (rdd=MapPartitionsRDD, parents=[])
 
 这个查询没有 shuffle，所以只有一个 `ResultStage`。你在第 7 章写过的 Stage 划分逻辑，没有变。
 
-## 13.3 DataFrame 到底是什么
+## 12.3 DataFrame 到底是什么
 
 `DataFrame` 类很短：
 
@@ -307,13 +307,13 @@ RDD 惰性：积累 RDD 血缘
 DataFrame 惰性：积累逻辑计划树
 ```
 
-## 13.4 三个对象：Row、Schema、Expression
+## 12.4 三个对象：Row、Schema、Expression
 
 RDD 里每个元素可以是任意 Java 对象。DataFrame 不一样，它必须知道“列”。
 
 这里先用三个对象表达这件事。
 
-### 13.4.1 Row：有列名的一行
+### 12.4.1 Row：有列名的一行
 
 `Row` 是一行数据：
 
@@ -333,7 +333,7 @@ Row = 一行
 Schema = 这一行有哪些列、列是什么类型
 ```
 
-### 13.4.2 Schema：优化器能看懂列
+### 12.4.2 Schema：优化器能看懂列
 
 `Schema` 由一组 `Field` 构成：
 
@@ -373,7 +373,7 @@ GreaterThan
 
 树可以分析，函数不行。
 
-### 13.4.3 Expression：不是立刻算，而是先记下来
+### 12.4.3 Expression：不是立刻算，而是先记下来
 
 表达式是一个 sealed interface：
 
@@ -413,7 +413,7 @@ salary
 
 所以列裁剪规则知道：为了算 `adjusted_salary`，扫描时不需要读 `id` 和 `department`。
 
-## 13.5 逻辑计划：把每一步关系操作串成树
+## 12.5 逻辑计划：把每一步关系操作串成树
 
 `Expression` 只描述一行里的小计算：
 
@@ -476,7 +476,7 @@ flowchart BT
 
 这就是逻辑计划的意义：先把“要什么”完整记下来，再交给优化器决定这棵树能不能换个更省事的形状。
 
-## 13.6 Catalyst：规则改写不可变树
+## 12.6 Catalyst：规则改写不可变树
 
 Catalyst 最重要的不是某一条具体优化，而是这套处理查询的方式：
 
@@ -537,7 +537,7 @@ PruneScanColumns     让 Scan 只读需要的列
 
 这三条足够看清 Catalyst 的工作方式。
 
-### 13.6.1 谓词下推
+### 12.6.1 谓词下推
 
 规则代码很短：
 
@@ -581,7 +581,7 @@ pushedFilters    能推给数据源的过滤条件
 
 这里有一个边界要说清楚：为了让计划变化最直观，代码里直接把 `Filter` 节点合进了 `Scan`。Spark 1.3.0 通常更谨慎：它会把可转换的过滤条件传给数据源，但还会在 Spark 侧保留一层 `Filter`。因为数据源下推有时只是“尽量少读”的优化提示，不能总是假设外部系统已经精确完成了全部过滤。
 
-### 13.6.2 列裁剪
+### 12.6.2 列裁剪
 
 列裁剪规则看的是表达式引用：
 
@@ -622,7 +622,7 @@ salary
 
 这里是内存数据源，看不到 I/O 差距，但执行计划已经长出了 Spark SQL 的形状。
 
-## 13.7 物理计划：落回 RDD
+## 12.7 物理计划：落回 RDD
 
 优化后的逻辑计划还不能直接跑。它只说“要什么”，还没有说“怎么用 mini-spark 跑”。
 
@@ -644,7 +644,7 @@ if (logicalPlan instanceof Aggregate aggregate) {
 
 每个 `Exec` 节点都知道怎么生成 RDD。
 
-### 13.7.1 ProjectExec = RDD.map
+### 12.7.1 ProjectExec = RDD.map
 
 `ProjectExec` 的核心就是：
 
@@ -662,7 +662,7 @@ return child.execute().map(row -> {
 
 DataFrame 的 `select()` 看起来是新 API，落到底层仍然是 `map`。
 
-### 13.7.2 ScanExec = RDD.filter + RDD.map
+### 12.7.2 ScanExec = RDD.filter + RDD.map
 
 `ScanExec` 接收优化器塞进来的两个信息：
 
@@ -686,7 +686,7 @@ return current;
 
 在 Spark 里，如果底层是 Parquet、JDBC、HBase，这一步可能真的把过滤和列裁剪传给外部系统，让外部系统少读数据。这里是内存表，所以还是转成 RDD 的 `filter` / `map`。接口位置是一样的，但 Spark 通常还会保留 Spark 侧过滤，保证结果语义不依赖外部数据源是否完全过滤干净。
 
-### 13.7.3 HashAggregateExec = RDD.reduceByKey
+### 12.7.3 HashAggregateExec = RDD.reduceByKey
 
 第二个查询：
 
@@ -735,23 +735,26 @@ ResultStage 2 (rdd=MapPartitionsRDD, parents=[1])
 
 `ShuffleDependency` 切出 Stage。
 
-这一串正好把全书连起来。
+这一串正好把 DataFrame 和前面的执行内核连起来。
 
-## 13.8 源码入口（选读）
+## 12.8 源码入口（选读）
 
-第 12 章对照的是 Spark `branch-0.5`，那个版本没有 SQL。要看 Spark SQL，需要切到更后面的代码。Spark 1.3.0 已经能看到这条链上的几个入口：
+RDD 时代的 Spark `branch-0.5` 还没有 SQL。要看 Spark SQL，需要切到更后面的代码。Spark 1.3.0 已经能看到这条链上的几个入口：
 
-```text
-sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
-sql/core/src/main/scala/org/apache/spark/sql/SQLContext.scala
-sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/trees/TreeNode.scala
-sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/rules/RuleExecutor.scala
-sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/Optimizer.scala
-sql/core/src/main/scala/org/apache/spark/sql/execution/SparkStrategies.scala
-sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala
-```
-
-这里只留入口，不做逐类对照。逐项源码对照是第 12 章的工作方式；这一步更关心结构化查询链路本身。
+> [!INFO]
+> **Spark 1.3.0 里的对应入口**
+>
+> ```text
+> sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
+> sql/core/src/main/scala/org/apache/spark/sql/SQLContext.scala
+> sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/trees/TreeNode.scala
+> sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/rules/RuleExecutor.scala
+> sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/Optimizer.scala
+> sql/core/src/main/scala/org/apache/spark/sql/execution/SparkStrategies.scala
+> sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala
+> ```
+>
+> 这里只留入口，不做逐类对照。逐项源码对照放到最后一章；这里更关心结构化查询链路本身。
 
 先抓住这张图：
 
@@ -786,7 +789,7 @@ flowchart LR
 
 主线对上以后，再读源码，复杂度就有位置了。
 
-## 13.9 小结
+## 12.9 小结
 
 走到这里，并没有推翻 RDD。
 
@@ -828,7 +831,7 @@ DataFrame 给 Spark 带来的是结构化信息：
 
 所以工业界后来更常写 SQL / DataFrame，不是因为 RDD 不重要，而是因为 RDD 已经沉到了执行底座里。你写的 `df.groupBy().count()` 生成的是聚合计划；等它被 `show()` / `collect()` 触发时，底下仍然要变成 RDD 的 shuffle。你写的 `df.cache()`，底下仍然要短路血缘；你写的 `spark.sql()`，最终仍然要提交 Stage 和 Task。
 
-从第 1 章到第 13 章，整条链已经打通：
+从第 1 章到这里，SQL / DataFrame 到 RDD 内核的链路已经打通：
 
 ```mermaid
 flowchart TB

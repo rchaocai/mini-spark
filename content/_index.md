@@ -40,8 +40,8 @@ bookToc: false
 | 9 | 从单机到分布式执行 |
 | 10 | Cache 与 Checkpoint |
 | 11 | Spark Streaming 与 DStream |
-| 12 | 致敬工业级 Spark |
-| 13 | 从 RDD 到 DataFrame |
+| 12 | 从 RDD 到 DataFrame |
+| 13 | 致敬工业级 Spark |
 
 ---
 

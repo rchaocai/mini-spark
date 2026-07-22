@@ -3,8 +3,8 @@ package com.sparklearn;
 import java.util.List;
 
 /**
- * 第 12 章核心 Demo——把前 10 章手写的每个关键类，与真实 Apache Spark 源码
- * 文件/方法逐行对照。读者能指着真实 Spark 某文件某方法，说出它对应自己
+ * 第 13 章核心 Demo——把 RDD 执行底座里的关键类，与 Apache Spark 源码
+ * 文件/方法逐行对照。读者能指着 Spark 某文件某方法，说出它对应前面
  * 第几章实现的哪个类/方法。
  *
  * <p>本章不引入新功能——这是全书的「认知收口」。
@@ -125,12 +125,12 @@ public final class SparkSourceMapDemo {
 
     public static void print() {
         System.out.println("=".repeat(78));
-        System.out.println("第 12 章 · 致敬工业级 Spark —— 源码对照地图");
+        System.out.println("第 13 章 · 致敬工业级 Spark —— 源码对照地图");
         System.out.println("=".repeat(78));
         System.out.println();
-        System.out.println("下表列出你亲手实现的每个关键类，与真实 Apache Spark 源码文件/方法的");
-        System.out.println("对应关系。左边是你前 10 章写的代码（Java），右边是真实的 Apache Spark（Scala）。");
-        System.out.println("读法：打开右边的文件，找到对应方法，并排阅读——你会发现「核心一模一样」。");
+        System.out.println("下表列出 RDD 执行底座里的关键类，与 Apache Spark 源码文件/方法的");
+        System.out.println("对应关系。左边是教学版代码（Java），右边是 Apache Spark（Scala）。");
+        System.out.println("读法：打开右边的文件，找到对应方法，并排阅读，看关键路径如何对上。");
         System.out.println();
 
         String fmt = "│ %-26s │ %-3s │ %-28s │ %-36s │%n";
@@ -138,7 +138,7 @@ public final class SparkSourceMapDemo {
                 + "+" + "-".repeat(30) + "+" + "-".repeat(38) + "+";
 
         System.out.println(sep);
-        System.out.printf(fmt, "概念", "章", "我们的类", "真实 Spark 文件");
+        System.out.printf(fmt, "概念", "章", "教学版类", "Spark 文件");
         System.out.println(sep);
 
         for (Entry e : MAP) {
@@ -148,7 +148,7 @@ public final class SparkSourceMapDemo {
         System.out.println();
 
         System.out.println("=".repeat(78));
-        System.out.println("核心对照：逐条展开（你的代码 ↔ 真实 Spark）");
+        System.out.println("核心对照：逐条展开（教学版代码 ↔ Apache Spark）");
         System.out.println("=".repeat(78));
 
         for (int i = 0; i < MAP.size(); i++) {
@@ -161,7 +161,7 @@ public final class SparkSourceMapDemo {
             System.out.println("\n  你的代码（com.sparklearn." + e.ourClass() + "）：");
             System.out.println("  " + e.ourMethod().replace("\n", "\n  "));
 
-            System.out.println("\n  真实 Spark（" + e.sparkFile() + "）：");
+            System.out.println("\n  Apache Spark（" + e.sparkFile() + "）：");
             System.out.println("  " + e.sparkSignature().replace("\n", "\n  "));
         }
 
@@ -171,7 +171,7 @@ public final class SparkSourceMapDemo {
         System.out.println("=".repeat(78));
         System.out.println();
         System.out.println("下面这段 pipeline——ListRDD → map → reduceByKey → collect——");
-        System.out.println("在你的代码和真实 Spark 里，走的是一条完全相同的路：");
+        System.out.println("在教学版代码和 Apache Spark 里，走的是同一条关键路径：");
         System.out.println();
         System.out.println("  1. RDD.map() 创建 MapPartitionsRDD（包装父迭代器）");
         System.out.println("  2. reduceByKey → ShuffledRDD");
@@ -182,7 +182,7 @@ public final class SparkSourceMapDemo {
         System.out.println("     → 先跑 ShuffleMapStage，再跑 ResultStage");
         System.out.println("  4. collect() → 遍历分区 → iterator(p) → compute(p) → 嵌套迭代器展开");
         System.out.println();
-        System.out.println("你在前 10 章写过的每一块核心逻辑，在真实 Spark 源码里都有对应位置。");
+        System.out.println("前面写过的每一块核心逻辑，在 Apache Spark 源码里都有对应位置。");
         System.out.println("差别在哪？在 Scala 语法、在 Mesos/YARN 调度、在 Hadoop I/O 格式——");
         System.out.println("在工程化的外衣。核心架构——RDD、Dependency、Stage、DAGScheduler、");
         System.out.println("ShuffleMapTask、Iterator 嵌套流水线——你亲手写过了。");

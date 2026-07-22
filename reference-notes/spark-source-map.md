@@ -1,6 +1,6 @@
 # 真实 Spark 源码对照地图
 
-> 支撑第 12 章（运行行为对照），也供各章 spec「参考对照」一节引用。
+> 支撑第 13 章（运行行为对照），也供各章 spec「参考对照」一节引用。
 > 参考工程：[apache/spark](https://github.com/apache/spark) 的 [`branch-0.5`](https://github.com/apache/spark/tree/branch-0.5) 分支（约 `v0.5.2`，早期 Apache Spark，**Scala / SBT，无 Spark SQL**）。
 > 下表「真实 Spark 文件」均相对仓库根目录（如 `core/src/main/scala/spark/RDD.scala`）。
 
@@ -36,11 +36,11 @@
 | Checkpoint（切断血缘） | 10 | （**0.5 无**；v0.7.0 起）`rdd/CheckpointRDD.scala`、`RDD.scala` | `checkpoint()`；checkpoint 后 `final def dependencies` 改指向 `CheckpointRDD`，切断血缘 |
 | RPC / 分布式通信 | 9 | `core/src/main/scala/spark/Executor.scala`、`HttpServer` | 本书 `NetworkTaskScheduler`/`Executor` 用 Java Socket；参考工程用 **Scala Actors + HTTP** |
 | Streaming / DStream | 11 | （**0.5 无**；v0.7.0 起）`streaming/src/main/scala/spark/streaming/*.scala` | `StreamingContext` / `DStream` / micro-batch；DStream 每个 batch 生成 RDD |
-| DataFrame / Catalyst | 13 | `v1.3.0` 的 `sql/core`、`sql/catalyst` | DataFrame API、Catalyst 树与规则、物理规划 |
+| DataFrame / Catalyst | 12 | `v1.3.0` 的 `sql/core`、`sql/catalyst` | DataFrame API、Catalyst 树与规则、物理规划 |
 
 ## 备注
-- 第 12 章主参考工程为 **RDD 时代 Spark**（无 Spark SQL），所以第 13 章 DataFrame/Catalyst 需要切到 `v1.3.0` 对照。
-- 第 12 章建议按上表逐行打开真实文件与本书实现**并排阅读**，体会「核心一模一样」。
+- 第 13 章主参考工程为 **RDD 时代 Spark**（无 Spark SQL），所以第 12 章 DataFrame/Catalyst 需要切到 `v1.3.0` 对照。
+- 第 13 章建议按上表逐行打开真实文件与本书实现**并排阅读**，体会「核心一模一样」。
 
 ## Spark SQL / Catalyst 源码对照（v1.3.0）
 
@@ -48,7 +48,7 @@ Spark SQL 论文（SIGMOD 2015）对应的核心结构，在本地参考仓库 `
 
 | 本书概念 | 本书代码 | Spark 1.3.0 文件 | 说明 |
 |---|---|---|---|
-| DataFrame | `ch13-dataframe-future/src/main/java/com/sparklearn/sql/DataFrame.java` | `sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala` | 带 schema 的惰性逻辑计划，action 触发执行 |
+| DataFrame | `ch12-dataframe-future/src/main/java/com/sparklearn/sql/DataFrame.java` | `sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala` | 带 schema 的惰性逻辑计划，action 触发执行 |
 | SQLContext | `.../sql/SQLContext.java` | `sql/core/src/main/scala/org/apache/spark/sql/SQLContext.scala` | 创建 DataFrame，持有 analyzer / optimizer / planner |
 | 逻辑计划 | `.../sql/catalyst/plans/logical/*` | `sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/LogicalPlan.scala` | 查询的逻辑树 |
 | 表达式 | `.../sql/catalyst/expressions/*` | `sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/*` | 列引用、字面量、谓词、算术表达式 |
