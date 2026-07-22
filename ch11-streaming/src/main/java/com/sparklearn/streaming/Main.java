@@ -46,7 +46,9 @@ public final class Main {
                         .sorted((a, b) -> a.key().compareTo(b.key()))
                         .forEach(pair -> System.out.println(pair.key() + " -> " + pair.value()));
                 System.out.println();
-                printedBatches.add(time.toString());
+                if (!counts.isEmpty()) {
+                    printedBatches.add(time.toString());
+                }
             });
 
             // 窗口版：最近 2 个 batch 合并后再 count。
@@ -55,11 +57,17 @@ public final class Main {
                     .map(word -> new KeyValuePair<>(word, 1))
                     .reduceByKey(Integer::sum, 2);
             windowCounts.foreachRDD((rdd, time) -> {
-                System.out.println("[window 2s] @" + time + " => " + rdd.collect());
+                List<KeyValuePair<String, Integer>> counts = rdd.collect();
+                System.out.println("[window 2s] @" + time);
+                counts.stream()
+                        .sorted((a, b) -> a.key().compareTo(b.key()))
+                        .forEach(pair -> System.out.println(pair.key() + " -> " + pair.value()));
+                System.out.println();
             });
 
             ssc.start();
-            // 3 个输入 batch；第 4 个 batch 队列已空，输出 job 数为 0。
+            // 推进 4 个 batch：前 3 个各吃队列里一个 RDD；第 4 个队列已空，
+            // 输入流回退到空 RDD，仍会生成并执行 job（对空数据跑一遍）。
             ssc.advance(4);
 
             System.out.println("完成 batch 数: " + ssc.batchesStarted());
