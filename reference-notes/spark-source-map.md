@@ -36,8 +36,24 @@
 | Checkpoint（切断血缘） | 10 | （**0.5 无**；v0.7.0 起）`rdd/CheckpointRDD.scala`、`RDD.scala` | `checkpoint()`；checkpoint 后 `final def dependencies` 改指向 `CheckpointRDD`，切断血缘 |
 | RPC / 分布式通信 | 9 | `core/src/main/scala/spark/Executor.scala`、`HttpServer` | 本书 `NetworkTaskScheduler`/`Executor` 用 Java Socket；参考工程用 **Scala Actors + HTTP** |
 | Streaming / DStream | 11 | （**0.5 无**；v0.7.0 起）`streaming/src/main/scala/spark/streaming/*.scala` | `StreamingContext` / `DStream` / micro-batch；DStream 每个 batch 生成 RDD |
-| DataFrame / Catalyst | 13 | （参考工程无） | 指向**现代 Spark** 的 `sql/catalyst` 模块 |
+| DataFrame / Catalyst | 13 | `v1.3.0` 的 `sql/core`、`sql/catalyst` | DataFrame API、Catalyst 树与规则、物理规划 |
 
 ## 备注
-- 参考工程为 **RDD 时代 Spark**（无 Spark SQL）。第 9 章 RPC、第 11 章 Streaming、第 13 章 DataFrame/Catalyst 在参考工程中**无直接对应**，需自实现或对照现代 Spark。
+- 第 12 章主参考工程为 **RDD 时代 Spark**（无 Spark SQL），所以第 13 章 DataFrame/Catalyst 需要切到 `v1.3.0` 对照。
 - 第 12 章建议按上表逐行打开真实文件与本书实现**并排阅读**，体会「核心一模一样」。
+
+## Spark SQL / Catalyst 源码对照（v1.3.0）
+
+Spark SQL 论文（SIGMOD 2015）对应的核心结构，在本地参考仓库 `/Users/cairuchao/project/spark` 的 `v1.3.0` 标签下可以看到：
+
+| 本书概念 | 本书代码 | Spark 1.3.0 文件 | 说明 |
+|---|---|---|---|
+| DataFrame | `ch13-dataframe-future/src/main/java/com/sparklearn/sql/DataFrame.java` | `sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala` | 带 schema 的惰性逻辑计划，action 触发执行 |
+| SQLContext | `.../sql/SQLContext.java` | `sql/core/src/main/scala/org/apache/spark/sql/SQLContext.scala` | 创建 DataFrame，持有 analyzer / optimizer / planner |
+| 逻辑计划 | `.../sql/catalyst/plans/logical/*` | `sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/LogicalPlan.scala` | 查询的逻辑树 |
+| 表达式 | `.../sql/catalyst/expressions/*` | `sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/*` | 列引用、字面量、谓词、算术表达式 |
+| 树变换 | `.../sql/catalyst/plans/logical/LogicalPlan.java` | `sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/trees/TreeNode.scala` | 递归 transform，不修改原树 |
+| 规则执行 | `.../sql/catalyst/rules/RuleExecutor.java` | `sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/rules/RuleExecutor.scala` | batch + fixed point |
+| 优化器 | `.../sql/catalyst/optimizer/Optimizer.java` | `sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/Optimizer.scala` | 组织常量折叠、谓词下推、列裁剪等规则 |
+| 物理规划 | `.../sql/execution/PhysicalPlanner.java` | `sql/core/src/main/scala/org/apache/spark/sql/execution/SparkStrategies.scala` | 从逻辑计划选择可执行算子 |
+| 数据源下推 | `.../sql/execution/ScanExec.java` | `sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala` | `PrunedScan` / `PrunedFilteredScan` / `CatalystScan` |

@@ -34,5 +34,6 @@
     <module>ch10-cache-checkpoint</module>
     <module>ch11-streaming</module>
     <module>ch12-real-spark</module>
+    <module>ch13-dataframe-future</module>
   </modules>
 </project>
