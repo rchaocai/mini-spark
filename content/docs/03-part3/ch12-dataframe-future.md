@@ -14,14 +14,17 @@ summary: "RDD 是执行底座，但工业界日常更常写 SQL 和 DataFrame。
 >
 > 运行示例：`java -Dfile.encoding=UTF-8 -cp ch12-dataframe-future/target/classes com.sparklearn.sql.Main`
 
-前 11 章，你已经写过一套能跑的 RDD 内核：
+前 11 章，这台执行底座已经闭环：批和流两条路，最后都汇到同一台机器。
 
-```text
-RDD / Dependency / Stage / Task
-Shuffle / cache / checkpoint / Streaming
+```mermaid
+flowchart LR
+    B(["一批静态数据<br/>（一次到齐）"]) --> Core["执行底座<br/>（前 11 章）"]
+    R(["一条不断到来的河<br/>（持续到达）"]) --> DS["DStream<br/>按时间切成 RDD"]
+    DS --> Core
+    Core --> Out(["结果"])
 ```
 
-如果只看执行底座，这条路已经闭环。
+落到这台底座上的数据——不管是一批还是一条河——都走同一套分区、血缘、调度、重算。单看执行底座，这条路已经闭环。
 
 但你去看今天日常业务里的 Spark 代码，最常见的往往不是：
 
