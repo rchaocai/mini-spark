@@ -3,7 +3,7 @@ title: "第 13 章 · 从 RDD 到 DataFrame"
 weight: 5
 date: 2026-07-22
 tags: ["Spark SQL", "DataFrame", "Catalyst", "逻辑计划", "物理计划", "RDD"]
-summary: "RDD 是执行底座，但工业界日常更常写 SQL 和 DataFrame。本章在 mini-spark 的 RDD 内核上加一层结构化查询：DataFrame 只保存惰性逻辑计划，Catalyst 用规则改写这棵树，物理计划再落回 RDD、Stage、Shuffle。"
+summary: "RDD 是执行底座，但工业界日常更常写 SQL 和 DataFrame。在 mini-spark 的 RDD 内核上加一层结构化查询：DataFrame 只保存惰性逻辑计划，Catalyst 用规则改写这棵树，物理计划再落回 RDD、Stage、Shuffle。"
 ---
 
 # 第 13 章 · 从 RDD 到 DataFrame
@@ -14,7 +14,7 @@ summary: "RDD 是执行底座，但工业界日常更常写 SQL 和 DataFrame。
 >
 > 运行示例：`java -Dfile.encoding=UTF-8 -cp ch13-dataframe-future/target/classes com.sparklearn.sql.Main`
 
-前 12 章，你已经写过一套能跑的 RDD 内核，也把它和真实 Spark 的 RDD 时代源码对照过。
+前 12 章，你已经写过一套能跑的 RDD 内核，也把它和工业级 Spark 的 RDD 时代源码对照过。
 
 如果只看底层，这条路已经闭环：
 
@@ -23,7 +23,7 @@ RDD / Dependency / Stage / Task
 Shuffle / cache / checkpoint / Streaming
 ```
 
-但你去看今天真实业务里的 Spark 代码，最常见的往往不是：
+但你去看今天日常业务里的 Spark 代码，最常见的往往不是：
 
 ```java
 rdd.map(...).filter(...).reduceByKey(...)
@@ -50,13 +50,13 @@ employees
 这很容易让人产生一个疑问：
 
 ```text
-我们花这么多章写 RDD
+花这么多章写 RDD
 是不是已经过时了？
 ```
 
 不是。
 
-这一章要把最后一层关系接上：**RDD 是执行底座，DataFrame / SQL 是建在底座上的声明式查询层。**
+最后一层关系是：**RDD 是执行底座，DataFrame / SQL 是建在底座上的声明式查询层。**
 
 用户不再直接告诉系统“先 map 再 filter 再 shuffle”，而是描述“我要哪些列、过滤哪些行、按什么分组”。系统先把这段描述保存成一棵树，再用优化器改写它，最后把改写后的树翻译回你熟悉的 RDD 变换。
 
@@ -67,15 +67,15 @@ DataFrame API：把关系查询和 Spark 程序紧密接在一起
 Catalyst：用可组合规则改写不可变树
 ```
 
-本章不做完整 SQL 解析器，也不实现复杂的物理计划选择。我们只实现一条最小但完整的路径：
+先不碰完整 SQL 解析器，也不碰复杂的物理计划选择。只走一条最小但完整的路径：
 
-```text
-DataFrame DSL
-  → LogicalPlan
-  → Catalyst 规则优化
-  → PhysicalPlan
-  → RDD transformation
-  → DAGScheduler / TaskScheduler
+```mermaid
+flowchart LR
+    DSL[DataFrame DSL] --> Logical[LogicalPlan<br/>描述要什么]
+    Logical --> Optimized[Catalyst<br/>规则优化]
+    Optimized --> Physical[PhysicalPlan<br/>描述怎么跑]
+    Physical --> RDD[RDD transformation]
+    RDD --> Scheduler[DAGScheduler / TaskScheduler]
 ```
 
 跑通这条路径以后，`spark.sql()` 和 `df.groupBy()` 就不再是黑箱。
@@ -156,7 +156,7 @@ count(*)
 
 ## 13.2 先跑起来：一条 DataFrame 查询
 
-先跑本章代码：
+先把代码跑起来：
 
 ```bash
 mvn -pl ch13-dataframe-future package
@@ -211,7 +211,7 @@ Project(name, salary * 1.25 AS adjusted_salary)
 变化有两个：
 
 ```text
-谓词下推：本章把 Filter 合进 Scan，扫描时先过滤
+谓词下推：这里把 Filter 合进 Scan，扫描时先过滤
 列裁剪：Scan 不再读 id / department，只读 name / salary
 ```
 
@@ -249,7 +249,7 @@ ResultStage 0 (rdd=MapPartitionsRDD, parents=[])
 
 ## 13.3 DataFrame 到底是什么
 
-本章的 `DataFrame` 很短：
+`DataFrame` 类很短：
 
 ```java
 public final class DataFrame {
@@ -291,12 +291,13 @@ DataFrame = 带 schema 的惰性逻辑计划
 
 直接对 `DataFrame` 调 `collect()`、`show()`、`count()` 这类 action，才会触发：
 
-```text
-logicalPlan
-  → optimize
-  → physical plan
-  → RDD.execute()
-  → collect()
+```mermaid
+flowchart LR
+    Action[collect / show / count] --> QE[QueryExecution]
+    QE --> Optimize[optimize<br/>改写逻辑计划]
+    Optimize --> Plan[physical plan<br/>选择执行算子]
+    Plan --> Execute[RDD.execute]
+    Execute --> Result[结果回到 Driver]
 ```
 
 这和 RDD 的惰性很像，但惰性的东西不一样：
@@ -310,7 +311,7 @@ DataFrame 惰性：积累逻辑计划树
 
 RDD 里每个元素可以是任意 Java 对象。DataFrame 不一样，它必须知道“列”。
 
-本章用三个对象表达这件事。
+这里用三个对象表达这件事。
 
 ### 13.4.1 Row：有列名的一行
 
@@ -325,7 +326,7 @@ Row.of("id", 1,
 
 它内部是一个保留顺序的 `Map`。这不是高性能设计，只是为了让教学输出稳定、容易读。
 
-真实 Spark SQL 的内部行格式复杂得多，尤其现代版本会用更紧凑的二进制表示。但对这一章来说，只要记住：
+Spark SQL 的内部行格式复杂得多，尤其现代版本会用更紧凑的二进制表示。但现在只要记住：
 
 ```text
 Row = 一行
@@ -374,7 +375,7 @@ GreaterThan
 
 ### 13.4.3 Expression：不是立刻算，而是先记下来
 
-本章的表达式是一个 sealed interface：
+表达式是一个 sealed interface：
 
 ```java
 public sealed interface Expression extends Serializable
@@ -423,17 +424,20 @@ Batch
 FixedPoint
 ```
 
-真实 Spark 1.3.0 里，对应源码在：
-
-```text
-sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/trees/TreeNode.scala
-sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/rules/RuleExecutor.scala
-sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/Optimizer.scala
-```
-
 `TreeNode` 提供递归变换；`RuleExecutor` 把规则分成 batch；每个 batch 可以反复执行，直到树不再变化，也就是 fixed point。
 
-本章照这个结构写了一个极简版：
+> [!INFO]
+> **想打开源码时再看**
+>
+> Spark 1.3.0 里，Catalyst 这几个对象大致在：
+>
+> ```text
+> sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/trees/TreeNode.scala
+> sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/rules/RuleExecutor.scala
+> sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/Optimizer.scala
+> ```
+
+照这个结构，可以写出一个极简版：
 
 ```java
 public final class RuleExecutor {
@@ -458,9 +462,9 @@ public final class RuleExecutor {
 }
 ```
 
-这里的 fixed point 不是无限等下去。每一轮都比较新旧两棵树；如果树不再变化，就停。如果某些规则来回振荡，也会被 `MAX_ITERATIONS` 截住。真实优化器也需要这种安全边界。
+这里的 fixed point 不是无限等下去。每一轮都比较新旧两棵树；如果树不再变化，就停。如果某些规则来回振荡，也会被 `MAX_ITERATIONS` 截住。优化器需要这种安全边界。
 
-真实 Catalyst 的规则很多。本章只写三条：
+Catalyst 可以挂很多规则。先写三条，就够看清它怎么工作：
 
 ```text
 CombineFilters       合并相邻 Filter
@@ -496,7 +500,7 @@ Filter(condition)
 Scan(table, pushedFilters=[condition])
 ```
 
-真实 Spark SQL 的数据源接口也按能力分层。最简单的数据源只能全表读；更强一点的，可以接收“需要哪些列”；再强一点的，还可以接收“哪些过滤条件可以尽量提前做”：
+Spark SQL 的数据源接口也按能力分层。最简单的数据源只能全表读；更强一点的，可以接收“需要哪些列”；再强一点的，还可以接收“哪些过滤条件可以尽量提前做”：
 
 ```text
 TableScan             只能全表读
@@ -505,14 +509,14 @@ PrunedFilteredScan    能只读列，并尝试下推过滤条件
 CatalystScan          能接收更完整的 Catalyst 表达式
 ```
 
-本章的 `Scan` 就扮演了一个教学版 `PrunedFilteredScan`：
+这里的 `Scan` 就扮演一个简化版 `PrunedFilteredScan`：
 
 ```text
 requiredColumns  要读哪些列
 pushedFilters    能推给数据源的过滤条件
 ```
 
-这里有一个边界要说清楚：本章为了让计划变化最直观，直接把 `Filter` 节点合进了 `Scan`。真实 Spark 1.3.0 通常更谨慎：它会把可转换的过滤条件传给数据源，但还会在 Spark 侧保留一层 `Filter`。因为数据源下推有时只是“尽量少读”的优化提示，不能总是假设外部系统已经精确完成了全部过滤。
+这里有一个边界要说清楚：为了让计划变化最直观，代码里直接把 `Filter` 节点合进了 `Scan`。Spark 1.3.0 通常更谨慎：它会把可转换的过滤条件传给数据源，但还会在 Spark 侧保留一层 `Filter`。因为数据源下推有时只是“尽量少读”的优化提示，不能总是假设外部系统已经精确完成了全部过滤。
 
 ### 13.5.2 列裁剪
 
@@ -551,9 +555,9 @@ department
 salary
 ```
 
-真实系统里，列裁剪的收益可能非常大。尤其是 Parquet 这类列式存储，少读一列就可能少读一批磁盘块。
+生产系统里，列裁剪的收益可能非常大。尤其是 Parquet 这类列式存储，少读一列就可能少读一批磁盘块。
 
-本章只是内存数据源，看不到 I/O 差距，但执行计划已经长成了真实 Spark SQL 的样子。
+这里是内存数据源，看不到 I/O 差距，但执行计划已经长出了 Spark SQL 的形状。
 
 ## 13.6 物理计划：落回 RDD
 
@@ -561,7 +565,7 @@ salary
 
 所以要做物理规划。
 
-本章的 `PhysicalPlanner` 很直接：
+`PhysicalPlanner` 很直接：
 
 ```java
 if (logicalPlan instanceof Scan scan) {
@@ -617,7 +621,7 @@ if (!requiredColumns.isEmpty()) {
 return current;
 ```
 
-在真实 Spark 里，如果底层是 Parquet、JDBC、HBase，这一步可能真的把过滤和列裁剪传给外部系统，让外部系统少读数据。本章是教学版内存表，所以还是转成 RDD 的 `filter` / `map`。接口位置是一样的，但真实系统通常还会保留 Spark 侧过滤，保证结果语义不依赖外部数据源是否完全过滤干净。
+在 Spark 里，如果底层是 Parquet、JDBC、HBase，这一步可能真的把过滤和列裁剪传给外部系统，让外部系统少读数据。这里是内存表，所以还是转成 RDD 的 `filter` / `map`。接口位置是一样的，但 Spark 通常还会保留 Spark 侧过滤，保证结果语义不依赖外部数据源是否完全过滤干净。
 
 ### 13.6.3 HashAggregateExec = RDD.reduceByKey
 
@@ -670,11 +674,11 @@ ResultStage 2 (rdd=MapPartitionsRDD, parents=[1])
 
 这一串正好把全书连起来。
 
-## 13.7 和真实 Spark SQL 源码对照
+## 13.7 顺手定位 Spark SQL 源码
 
 第 12 章对照的是 Spark `branch-0.5`，那个版本没有 SQL。
 
-为了看 Spark SQL，要切到更后面的源码。本地参考仓库 `/Users/cairuchao/project/spark` 当前检出是 `v0.7.2`，也还没有 DataFrame；但同一个仓库里 `v1.3.0` 已经有论文对应的关键结构：
+第 12 章对照的是 Spark `branch-0.5`，那个版本没有 SQL。要看 Spark SQL，需要切到更后面的代码。Spark 1.3.0 已经能看到这条链上的几个入口：
 
 ```text
 sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
@@ -686,21 +690,21 @@ sql/core/src/main/scala/org/apache/spark/sql/execution/SparkStrategies.scala
 sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala
 ```
 
-可以把本章代码和真实源码按这张表对起来：
+这里只留入口，不做逐类对照。逐项源码对照是第 12 章的工作方式；这一步更关心结构化查询链路本身。
 
-| 本章 | 真实 Spark 1.3.0 | 作用 |
-|---|---|---|
-| `DataFrame` | `DataFrame.scala` | 保存逻辑计划，提供 `select` / `filter` / action |
-| `SQLContext` | `SQLContext.scala` | 创建 DataFrame，持有 analyzer / optimizer / planner |
-| `LogicalPlan` | `catalyst/plans/logical/LogicalPlan.scala` | 查询的逻辑树 |
-| `Expression` | `catalyst/expressions/*` | 列引用、字面量、比较、算术表达式 |
-| `RuleExecutor` | `catalyst/rules/RuleExecutor.scala` | 按 batch 跑规则，直到 fixed point |
-| `Optimizer` | `catalyst/optimizer/Optimizer.scala` | 组织规则批次 |
-| `PhysicalPlanner` | `execution/SparkStrategies.scala` | 把逻辑计划选成物理计划 |
-| `ScanExec` | `sources/interfaces.scala` 相关 Scan 接口 | 数据源列裁剪与谓词下推 |
-| `HashAggregateExec` | `execution` 下的聚合 / join 物理算子 | 最终生成 RDD 执行 |
+先抓住这张图：
 
-真实源码更完整，多了几个大块：
+```mermaid
+flowchart TB
+    API[DataFrame / SQL API] --> Logical[LogicalPlan / Expression]
+    Logical --> Rules[TreeNode.transform<br/>RuleExecutor batches]
+    Rules --> Optimizer[Optimizer<br/>谓词下推 / 列裁剪 / 表达式简化]
+    Optimizer --> Strategy[SparkStrategies<br/>选择物理算子]
+    Strategy --> RDDs["RDD[Row]"]
+    RDDs --> Core[DAGScheduler / TaskScheduler]
+```
+
+源码里还会继续展开几个大块：
 
 ```text
 Analyzer：解析未绑定的表名、列名、函数名，检查类型
@@ -709,22 +713,23 @@ Code Generation：把表达式编译成 JVM 字节码，减少解释执行开销
 Data Source API：接 Parquet / JSON / JDBC / Hive 等外部数据源
 ```
 
-本章没有实现这些，不是因为它们不重要，而是因为本章要抓主线：
+这些先不展开，不是因为它们不重要，而是因为主线已经够清楚：
 
-```text
-DataFrame 不是直接执行
-DataFrame 先生成逻辑计划
-Catalyst 优化逻辑计划
-物理计划再落回 RDD
+```mermaid
+flowchart LR
+    DF[DataFrame<br/>不是直接执行] --> LP[先生成逻辑计划]
+    LP --> CAT[Catalyst<br/>优化逻辑计划]
+    CAT --> PP[物理计划]
+    PP --> CORE[落回 RDD 内核]
 ```
 
-主线对上以后，再读真实源码，复杂度就有位置了。
+主线对上以后，再读源码，复杂度就有位置了。
 
-## 13.8 本章小结
+## 13.8 小结
 
-这一章，我们没有推翻 RDD。
+走到这里，并没有推翻 RDD。
 
-我们在 RDD 上面又盖了一层：
+RDD 上面多了一层：
 
 ```text
 DataFrame / SQL
@@ -764,15 +769,16 @@ DataFrame 给 Spark 带来的是结构化信息：
 
 从第 1 章到第 13 章，整条链已经打通：
 
-```text
-SQL / DataFrame
-  → Catalyst 规则改写
-  → RDD transformation
-  → Stage 划分
-  → Task 执行
-  → Shuffle 交接
-  → cache / checkpoint
-  → 失败重算
+```mermaid
+flowchart TB
+    SQL[SQL / DataFrame] --> Catalyst[Catalyst 规则改写]
+    Catalyst --> RDD[RDD transformation]
+    RDD --> Stage[Stage 划分]
+    Stage --> Task[Task 执行]
+    Task --> Shuffle[Shuffle 交接]
+    RDD --> Cache[cache / checkpoint]
+    Shuffle --> Recovery[失败时沿血缘重算]
+    Cache --> Recovery
 ```
 
 你现在再看到一行 Spark SQL，不只是会写。
