@@ -317,7 +317,7 @@ zeroTime       = Time(0)
 
 这里有个细节值得停一下：时间**不是用墙钟（真实时钟）推进的**，没有任何后台线程在每秒触发一次。`StreamingContext` 提供的是一个手动把时间往前推的动作——`advance()` 推一格，时间往前走一个 `batchDuration`。
 
-为什么要这样？因为"什么时候该往前走一格"和"走到这一格要算什么"，是两件最好分开的事。把它们解耦之后，业务逻辑（算词频）只认逻辑时间点，不认墙钟：想要每秒走一格，就在外面挂一个定时器去调 `advance()`；想要在测试里精确控制，就手动一格一格拨。同一个计算图，两种推进方式都能用。
+为什么要这样？因为"什么时候该往前走一格"和"走到这一格要算什么"，是两件最好分开的事。把它们解耦之后，业务逻辑（算词频）只认逻辑时间点，不认墙钟：想要每秒走一格，就在外面挂一个定时器去调 `advance()`；想要在测试里精确控制，就手动一格一格往前推。同一个计算图，两种推进方式都能用。
 
 ### 11.5.2 DStream 内部：compute 与 getOrCompute
 
@@ -333,11 +333,16 @@ public abstract class DStream<T> implements Serializable {
     public abstract List<DStream<?>> dependencies();
     /** 在指定时间点，如何算出这个 RDD；没有数据时返回 empty。 */
     public abstract Optional<RDD<T>> compute(Time validTime);
-    // ...
+
+    /** 同一个时间点别造两遍：先查缓存，没有再调 compute，造完存回缓存。子类不能改。 */
+    public final Optional<RDD<T>> getOrCompute(Time time) { ... }
+    // ... 还有 map / filter / flatMap / reduceByKey / window 等变换方法
 }
 ```
 
-`slideDuration` 是每隔多久造一个 RDD；`dependencies` 说出父流（11.4.2 模板里的上游节点）；`compute` 就是"怎么造"那条描述本体。看一个最朴素的例子，`MappedDStream` 的 `compute`：
+前三行（`slideDuration`、`dependencies`、`compute`）都是 `abstract` 函数，子类得自己实现这些函数。而 `getOrCompute` 函数父类已经默认实现，其中`final` 表示不允许子类擅自修改该函数，只能原样继承来用。
+
+`slideDuration` 是每隔多久造一个 RDD；`dependencies` 表示依赖的父流（11.4.2 模板里的上游节点）；`compute` 表示怎么获取对应时间点的 RDD。以 `MappedDStream` 中的 `compute` 方法为例：
 
 ```java
 public Optional<RDD<U>> compute(Time validTime) {
@@ -346,9 +351,9 @@ public Optional<RDD<U>> compute(Time validTime) {
 }
 ```
 
-读出来正是 11.4.3 对应表里那行："问父流要这个时间点的 RDD，再对它调一次 `map`。" 其余 `FlatMappedDStream`、`FilteredDStream`、`ReducedDStream` 把 `map` 换成 `flatMap`/`filter`/`reduceByKey`，形状一模一样。输入流 `QueueInputDStream` 没有父流，`compute` 不往上问，自己从队列里取数据。每个变换流，就只是 11.4 说的"同一个 RDD 变换，在这个时间点上做一次"。
+读出来正是 11.4.3 对应表里那行："问父流要这个时间点的 RDD，再对它调一次 `map`。" 其余 `FlatMappedDStream`、`FilteredDStream`、`ReducedDStream` 把 `map` 换成 `flatMap`/`filter`/`reduceByKey`，形状一模一样。输入流 `QueueInputDStream` 没有父流，`compute` 不往上问，自己从队列里取数据。每个变换流就是："同一个 RDD 变换，在这个时间点上做一次"。
 
-`compute` 只是"怎么造"，真正被调用的入口是 `getOrCompute`——它在 `compute` 外面套了一层缓存：
+`compute` 获取对应时间点的 RDD 的真正入口在父流的 `getOrCompute` 中——它在 `compute` 外面套了一层缓存：
 
 ```java
 public final Optional<RDD<T>> getOrCompute(Time time) {
@@ -377,7 +382,7 @@ public final Optional<RDD<T>> getOrCompute(Time time) {
 
 这层缓存，正是 11.4.1"一个时间点一个 RDD"在代码里的兑现：同一个 `Time`，`compute` 跑多少遍结果都一样（它只搭惰性血缘），所以敢把第一次造好的存下来复用。后面 window 要回头用旧 batch 的 RDD（11.7），靠的就是这层"造过就留下"。
 
-`map`、`filter`、`flatMap`、`reduceByKey`、`window` 这些方法，返回的都还是 `DStream`——它们各自 `new` 一个上面对应的子类，把自己传进去当父流。这和 `rdd.map` 返回新 `RDD` 而不算数据，完全同构。
+`map`、`filter`、`flatMap`、`reduceByKey`、`window` 这些方法，返回的都还是 `DStream`——它们各自 `new` 一个上面对应的子类，把自己传进去当父流。这和 `rdd.map` 返回新 `RDD` 而不算数据，是一个道理。
 
 ### 11.5.3 StreamingContext：那层时间驱动器
 
@@ -408,7 +413,7 @@ public int advance() {
 }
 ```
 
-这四步串起来，就是 11.2 那个"时间驱动器"的全部：拨时间 → 收 job → 跑 job → 清旧账。一次 `advance()` 就是一个 batch 的完整生命周期。
+这四步串起来，就是 11.2 那个"时间驱动器"的全部：推时间 → 收 job → 跑 job → 清旧账。一次 `advance()` 就是一个 batch 的完整生命周期。
 
 ```mermaid
 sequenceDiagram
