@@ -3,7 +3,7 @@ title: "第 11 章 · Spark Streaming 与 DStream"
 weight: 3
 date: 2026-07-22
 tags: ["Streaming", "DStream", "微批", "window", "StreamingContext"]
-summary: "流计算不必另起炉灶。把连续输入按时间切成一个个小批次，每批仍是一个 RDD：DStream 是 RDD 的时间副本——一个时间点封装出一个 RDD，每个变换都对应同一个 RDD 变换；输出操作在每个时间点提交一次普通 job，容错仍沿 RDD 血缘重算。"
+summary: "这是 Spark 旧一代流引擎的讲法，也是理解后面 Structured Streaming 的桥。把连续输入按时间切成一个个小批次，每批仍是一个 RDD：DStream 是 RDD 的时间副本——一个时间点封装出一个 RDD，每个变换都对应同一个 RDD 变换；输出操作在每个时间点提交一次普通 job，容错仍沿 RDD 血缘重算。"
 ---
 
 # 第 11 章 · Spark Streaming 与 DStream
@@ -35,6 +35,11 @@ flowchart LR
 于是问题变了：数据不再是一份静止的输入，而是一条不断延伸的河。前 10 章这台引擎，能不能也处理这样的数据？
 
 直觉上，流计算像是另一种东西，会想到一个事件循环：来一条，处理一条，更新某个累加器，再等下一条。流计算还有另一条路——它之所以有意思，恰恰因为它把流重新摁回到了你已经写过的 RDD 上。
+
+> [!NOTE]
+> Spark Streaming / DStream 在 Spark 3.4 起已被标记为 deprecated，官方把它放在 legacy project 的位置，现行推荐是 Structured Streaming。
+>
+> 这章仍然要讲它，因为它最适合把“流为什么能落回 RDD”和“后来的 Structured Streaming 为什么要换层”这条路讲清楚。
 
 ## 11.1 流处理的难点：状态、故障与掉队者
 
@@ -342,7 +347,9 @@ public abstract class DStream<T> implements Serializable {
 
 前三行（`slideDuration`、`dependencies`、`compute`）都是 `abstract` 函数，子类得自己实现这些函数。而 `getOrCompute` 函数父类已经默认实现，其中`final` 表示不允许子类擅自修改该函数，只能原样继承来用。
 
-`slideDuration` 是每隔多久造一个 RDD；`dependencies` 表示依赖的父流（11.4.2 模板里的上游节点）；`compute` 表示怎么获取对应时间点的 RDD。以 `MappedDStream` 中的 `compute` 方法为例：
+`slideDuration` 是每隔多久造一个 RDD；`dependencies` 表示依赖的父流（11.4.2 模板里的上游节点）；`compute` 表示怎么获取对应时间点的 RDD。按 `compute` 怎么写，子类分成三类——输入流、转换流、输出流。一条完整的链首尾相接：输入流在最前面造数据，中间若干转换流层层套变换，输出流在最末尾收口。三类各看一个 `compute`。
+
+**转换流**有父流，`compute` 问父流要这个时间点的 RDD，再套一层变换。以 `MappedDStream` 为例：
 
 ```java
 public Optional<RDD<U>> compute(Time validTime) {
@@ -351,7 +358,30 @@ public Optional<RDD<U>> compute(Time validTime) {
 }
 ```
 
-读出来正是 11.4.3 对应表里那行："问父流要这个时间点的 RDD，再对它调一次 `map`。" 其余 `FlatMappedDStream`、`FilteredDStream`、`ReducedDStream` 把 `map` 换成 `flatMap`/`filter`/`reduceByKey`，形状一模一样。输入流 `QueueInputDStream` 没有父流，`compute` 不往上问，自己从队列里取数据。每个变换流就是："同一个 RDD 变换，在这个时间点上做一次"。
+读出来正是 11.4.3 对应表里那行：“问父流要这个时间点的 RDD，再对它调一次 `map`。” 其余 `FlatMappedDStream`、`FilteredDStream`、`ReducedDStream` 把 `map` 换成 `flatMap`/`filter`/`reduceByKey`，形状一模一样——每个转换流就是“同一个 RDD 变换，在这个时间点上做一次”。
+
+**输入流**没有父流，`compute` 不往上问，自己造数据。`QueueInputDStream` 从队列里取：
+
+```java
+public Optional<RDD<T>> compute(Time validTime) {
+    if (queue.isEmpty()) {
+        return Optional.ofNullable(defaultRDD);   // 队列空了，给兜底的空 RDD
+    }
+    return Optional.ofNullable(queue.poll());      // 否则取一个出来当这个 batch
+}
+```
+
+队列空了就给兜底的空 RDD，否则 `poll()` 取出一个当这个 batch 的数据。输入流是血缘的源头，再往上就没有父流了。（真实代码还有一个 `oneAtATime=false` 的分支，会把队列里剩余的 RDD 合成一个 `UnionRDD`；演示默认 `true`，每个 batch 只取一个，所以走 `poll`。）
+
+**输出流**不造 RDD。`ForEachDStream` 的 `compute` 直接返回空：
+
+```java
+public Optional<RDD<Void>> compute(Time validTime) {
+    return Optional.empty();
+}
+```
+
+它的活不在 `compute` 里，而在另一个方法 `generateJob`：每个 batch 拿父流的 RDD，跑一段副作用——11.3 里 `foreachRDD` 传进来的打印就是这段。`compute` 返回空，是因为输出流是链的末端，不往下游交 RDD。`generateJob` 怎么把整条血缘拉起来，11.6 展开。
 
 `compute` 获取对应时间点的 RDD 的真正入口在父流的 `getOrCompute` 中——它在 `compute` 外面套了一层缓存：
 
@@ -384,14 +414,124 @@ public final Optional<RDD<T>> getOrCompute(Time time) {
 
 `map`、`filter`、`flatMap`、`reduceByKey`、`window` 这些方法，返回的都还是 `DStream`——它们各自 `new` 一个上面对应的子类，把自己传进去当父流。这和 `rdd.map` 返回新 `RDD` 而不算数据，是一个道理。
 
-### 11.5.3 StreamingContext：那层时间驱动器
+### 11.5.3 输入流的数据从哪来：队列与 socket
+
+回头看 `QueueInputDStream` 的 `compute`，容易卡在两处：它收了一个 `Time validTime` 参数，函数体里却没用它——数据是从队列 `poll()` 出来的；那 `Time` 到底管什么？`poll()` 会不会是随机拿一个？
+
+先把两个问号各答一句：`Time` 是"这一批什么时候算"的**标签**，不是"挑哪份数据"的**选择器**；`poll()` 取的是队列**头部**，先进先出，`lines.add(...)` 什么顺序进来、就什么顺序出去，跟随机无关。
+
+把完整版 `compute` 三条分支摊开（演示默认 `oneAtATime=true`，只走第二条）：
+
+```java
+public Optional<RDD<T>> compute(Time validTime) {
+    if (queue.isEmpty()) {
+        return Optional.ofNullable(defaultRDD);        // 队列空：给兜底的空 RDD
+    }
+    if (oneAtATime) {
+        return Optional.ofNullable(queue.poll());       // 默认：弹头部一个，当一个 batch
+    }
+    ArrayList<RDD<T>> queued = new ArrayList<>(queue);
+    return Optional.of(new UnionRDD<>(..., queued));    // 否则：把队列里剩下的全合一个
+}
+```
+
+三条分支，没一条读 `validTime`。这个参数还在签名里，是因为所有 DStream 的 `compute` 都长一个样 `compute(Time)`，调度器才能一刀切地喊"各把 Time(1000) 的 RDD 交出来"。转换流（`MappedDStream` 那一类）拿 `Time` 去问父流要"这个时间点"的 RDD，`Time` 在它那里有用；输入流没有父流可问，数据全看自己包的是哪种数据源，`Time` 就用不上，收到忽略。
+
+那"按时间点取数据"到底存不存在？存在——但不在队列这种**预先塞好**的数据源里，而在**真实从外面进来**的数据源里：数据按它到达的时刻，被分到不同的 batch。下面这第二个输入流 `SocketInputDStream` 就是这种。
+
+**从 socket 读行的输入流。** `SocketInputDStream` 连到一个 `host:port`，把对方一行行发来的文本接成一条流。它的数据不是预先备好的，而是**实时到达**的。看它的 `compute` 怎么把"到达"和"时间点"绑起来：
+
+```java
+public Optional<RDD<String>> compute(Time validTime) {
+    List<String> drained = new ArrayList<>();
+    buffer.drainTo(drained);                       // 把缓冲里目前攒到的行一次性排空
+    if (drained.isEmpty()) {
+        return Optional.empty();                   // 这一阵没来数据：这个 batch 不交 RDD
+    }
+    return Optional.of(context().sparkContext().parallelize(drained, 1));
+}
+```
+
+同样不读 `validTime`，但不读的原因和队列流不同：队列流是"按进队顺序取一个"，socket 流是"取这一阵子到达的全部"。`buffer` 是一个缓冲队列，`drainTo` 把里面**到目前为止攒下的行**一次性倒出来——攒了什么、攒了多少，取决于上一次排空之后又来了什么。
+
+缓冲里的行是谁、什么时候放进去的？是 `start()` 起的一个**后台线程**，它一直堵在 socket 上读，每读到一行就塞进缓冲：
+
+```java
+public void start() {
+    socket = new Socket(host, port);
+    reader = new Thread(this::readLoop, "socket-input-" + port);
+    reader.setDaemon(true);
+    reader.start();
+}
+
+private void readLoop() {
+    try (BufferedReader in = ...) {
+        String line;
+        while ((line = in.readLine()) != null) {
+            buffer.add(line);                      // 来一行、攒一行，跟 batch 节拍无关
+        }
+    } catch (Exception ignored) { }
+}
+```
+
+`start()` 是 `InputDStream` 上的钩子，图启动时由 `DStreamGraph` 调一次。它连上 socket，再起一个守护线程跑 `readLoop`。这个线程的节奏完全由 socket 那头决定——对方发得快它就读得快，发了才读，**和 batch 的时间节拍互不相干**。`compute` 则按 batch 节拍被调度器调，每次把缓冲排空一次。一个只管往里攒，一个按点往外清，两边各走各的节奏，缓冲就是它们碰头的地方：
+
+```mermaid
+flowchart LR
+    S(["TCP socket"]) -- "一行行到达" --> R["后台读取线程<br/>读一行、塞一行"]
+    R --> B["缓冲 BlockingQueue"]
+    B -- "每个 batch 到点：<br/>compute 用 drainTo 排空" --> RDD["包成一个 RDD"]
+    RDD --> J["这个 batch 的 job"]
+```
+
+这么一摆，"按时间点取数据"就落到了实处：每个 batch 的 RDD，装的就是**从上一次排空到这一次之间、新到达的那些行**。这一段时间里没来数据，`drainTo` 倒出来是空的，`compute` 返回 `empty`，这个 batch 就不产生 job。
+
+**跑一遍，看数据怎么落进各自的 batch。** 演示用 `LineServer`——一个只给演示用的本地 TCP 桩，按指定的节奏往 socket 写行。主程序把它和 socket 流接上，再手动推三个 batch：第一个 batch 之前写两行，第二个之前一行也不写，第三个之前再写一行：
+
+```java
+LineServer server = new LineServer();        // 监听一个本地端口
+server.start();
+DStream<String> words = ssc.socketTextStream("localhost", server.port())
+        .flatMap(line -> List.of(line.split("\\s+")));
+// … 后面照旧 map / reduceByKey / foreachRDD 打印 …
+
+sendAndAdvance(server, ssc, List.of("apple banana", "banana cherry")); // batch1 之前写两行
+sendAndAdvance(server, ssc, List.of());                                  // batch2 之前一行也不写
+sendAndAdvance(server, ssc, List.of("cherry date"));                     // batch3 之前写一行
+```
+
+`sendAndAdvance` 就是"先让 server 写、等后台读取线程把行读进缓冲、再推一个 batch"。输出：
+
+```text
+=== batch @Time(1000) jobs=1 ===
+-------------------------------------------
+Time: Time(1000)
+-------------------------------------------
+apple -> 1
+banana -> 2
+cherry -> 1
+
+=== batch @Time(2000) jobs=0 ===
+=== batch @Time(3000) jobs=1 ===
+-------------------------------------------
+Time: Time(3000)
+-------------------------------------------
+cherry -> 1
+date -> 1
+```
+
+batch1 那一阵写进了 "apple banana"、"banana cherry" 两行，它的 RDD 里就是这几个词；batch2 那一阵什么也没写，缓冲是空的，`compute` 返回 `empty`，于是 `jobs=0`——这一批压根没提交 job；batch3 之前写了 "cherry date"，落进 batch3。
+
+这里和队列流有个对照值得看清：队列空了，`QueueInputDStream` 给的是**兜底的空 RDD**，job 照样跑（在空数据上跑一遍）；socket 这阵没数据，`SocketInputDStream` 干脆返回 `empty`，job 都不提交。同样是"这一批没数据"，两种数据源选了不同处理——队列流把"空"当成一种确定的数据交给下游，socket 流把"空"当成"没活干"。差别不在 DStream 框架，而在各自的数据源怎么定义"这一批有什么"。
+
+### 11.5.4 StreamingContext：那层时间驱动器
 
 `StreamingContext` 站在 `SparkContext` 之上。`SparkContext` 负责跑一个 RDD job；`StreamingContext` 负责按时间反复地提交 job。
 
 它内部有一张 `DStreamGraph`，记着两类流：
 
 ```text
-inputStreams    数据从哪进（queueStream，以后还可能有 receiver）
+inputStreams    数据从哪进（queueStream、socketTextStream）
 outputStreams   最终要执行哪些副作用（foreachRDD 注册的那些）
 ```
 

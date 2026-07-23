@@ -3,6 +3,7 @@ package com.sparklearn.streaming;
 import com.sparklearn.core.RDD;
 import com.sparklearn.core.SparkContext;
 import com.sparklearn.streaming.dstream.QueueInputDStream;
+import com.sparklearn.streaming.dstream.SocketInputDStream;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -73,6 +74,14 @@ public final class StreamingContext implements AutoCloseable {
 
     public <T> DStream<T> queueStream(Queue<RDD<T>> queue, boolean oneAtATime, RDD<T> defaultRDD) {
         return new QueueInputDStream<>(this, queue, oneAtATime, defaultRDD);
+    }
+
+    /**
+     * 连到 host:port，把从 socket 读到的文本行接成一条输入流。
+     * 每个 batch 拿到的是这个 batch 窗口内通过 socket 到达的行。
+     */
+    public DStream<String> socketTextStream(String host, int port) {
+        return new SocketInputDStream(this, host, port);
     }
 
     /**

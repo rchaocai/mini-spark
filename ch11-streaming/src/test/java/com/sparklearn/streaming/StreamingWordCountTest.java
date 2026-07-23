@@ -78,6 +78,42 @@ class StreamingWordCountTest {
     }
 
     @Test
+    void socketTextStreamDrainsPerBatchAndSkipsEmptyBatch() throws Exception {
+        try (LineServer server = new LineServer()) {
+            server.start();
+            try (SparkContext sc = new SparkContext(2, false);
+                 StreamingContext ssc = new StreamingContext(sc, Duration.seconds(1))) {
+
+                DStream<String> words = ssc.socketTextStream("localhost", server.port())
+                        .flatMap(line -> List.of(line.split("\\s+")));
+                Map<Time, Map<String, Integer>> batchCounts = new LinkedHashMap<>();
+                DStream<KeyValuePair<String, Integer>> counts = words
+                        .map(word -> new KeyValuePair<String, Integer>(word, 1))
+                        .reduceByKey(Integer::sum, 2);
+                counts.foreachRDD((rdd, time) -> batchCounts.put(time, toMap(rdd.collect())));
+
+                ssc.start();
+                sendAndAdvance(server, ssc, List.of("apple banana", "banana cherry")); // batch1
+                sendAndAdvance(server, ssc, List.of());                                  // batch2 没数据
+                sendAndAdvance(server, ssc, List.of("cherry date"));                     // batch3
+
+                assertEquals(2, batchCounts.size());
+                assertEquals(Map.of("apple", 1, "banana", 2, "cherry", 1),
+                        batchCounts.get(new Time(1000)));
+                assertEquals(Map.of("cherry", 1, "date", 1),
+                        batchCounts.get(new Time(3000)));
+            }
+        }
+    }
+
+    private static void sendAndAdvance(LineServer server, StreamingContext ssc, List<String> lines)
+            throws InterruptedException {
+        server.send(lines);
+        Thread.sleep(150);
+        ssc.advance();
+    }
+
+    @Test
     void windowKeepsEnoughHistoryAcrossSeveralBatches() {
         try (SparkContext sc = new SparkContext(2, false);
              StreamingContext ssc = new StreamingContext(sc, Duration.seconds(1))) {

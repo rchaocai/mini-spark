@@ -102,7 +102,7 @@ public final class SparkSourceMapDemo {
                     "RDD",
                     "cache() → shouldCache = true; iterator() 先查缓存",
                     "core/src/main/scala/spark/RDD.scala / CacheTracker.scala",
-                    "def cache(): RDD[T] = { shouldCache = true; this }\nfinal def iterator(split): 先查 CacheTracker"),
+                    "def cache(): RDD[T] = persist()\nfinal def iterator(split): storageLevel != NONE\n  → CacheManager.getOrCompute"),
 
             new Entry("Checkpoint（切断血缘）", 10,
                     "RDD",
