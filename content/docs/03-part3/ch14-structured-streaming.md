@@ -213,13 +213,103 @@ execution.advance();
 
 步骤 5 是流计算特有的：`source.addData()` 模拟新数据到达，`execution.advance()` 手动推进一个微批。在生产系统里，`advance()` 会由一个定时器反复调用（或者等待数据源通知有新数据），这里为了方便看清每一步，直接手动推。
 
-步骤 1 到 4 是搭框架，做一次；步骤 5 是流计算的核心循环，反复做。下面把每个组件拆开看。
+步骤 1 到 4 是搭框架，做一次；步骤 5 是流计算的核心循环，反复做。
 
-## 14.5 三个基础对象：Offset、Batch、Source/Sink 接口
+上面这段用的是 DataFrame API，下一节会展示完全等价的 SQL 写法。
+
+## 14.5 SQL 查询：同一棵树，两种写法
+
+上面的演示用的是 DataFrame API——`groupBy("word").count()`。但 Structured Streaming 既然基于 SQL 引擎，当然也能直接用 SQL 字符串：
+
+```java
+sql.registerTable("words", source.toDF().logicalPlan());
+DataFrame resultDF = sql.sql("SELECT word, count(*) FROM words GROUP BY word");
+```
+
+这两行生成的逻辑计划和 `groupBy("word").count()` 完全一样：
+
+```text
+Aggregate(groupBy=[word], count(*))
+  └── StreamingRelation(MemoryStream[offset=-1, batches=0])
+```
+
+> [!INFO]
+> **Spark 版本和分支**
+>
+> - SQL / DataFrame 支持从 **Spark 1.3**（`branch-1.3`）开始引入，最早的 SQL 解析器在 `sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/SqlParser.scala`，用 Scala 的 `StandardTokenParsers`（parser combinator）解析 SQL 字符串转成 LogicalPlan。
+> - Structured Streaming 从 **Spark 2.0**（`branch-2.0`）开始引入，相关源码在 `sql/core/.../execution/streaming/` 下。
+> - 本章的 SqlParser 参考了 Spark 1.3 的骨架，但用 Java 手写递归下降，只覆盖 `SELECT ... FROM ... GROUP BY ...` + `count(*)` 这个教学子集。
+
+### 14.5.1 SqlParser：把 SQL 字符串变成 LogicalPlan
+
+`SqlParser` 的核心流程只有三步：
+
+```text
+"SELECT word, count(*) FROM words GROUP BY word"
+  → tokenize: [SELECT, word, ,, count, (, *, ), FROM, words, GROUP, BY, word]
+  → 递归下降解析: SELECT子句 → FROM子句 → GROUP BY子句
+  → 构建 LogicalPlan: Aggregate([word], StreamingRelation(words))
+```
+
+```java
+public LogicalPlan parse(String sql) {
+    List<String> tokens = tokenize(sql);
+    return parseSelect(tokens);
+}
+```
+
+`tokenize` 把 SQL 字符串按空格、逗号、括号切成 token 列表。`parseSelect` 用递归下降识别 `SELECT ... FROM ... GROUP BY ...` 结构，最后调用 `buildPlan` 组装 LogicalPlan：
+
+```java
+private LogicalPlan buildPlan(String tableName, List<String> selectCols,
+                               boolean hasCountStar, List<String> groupByCols) {
+    LogicalPlan tablePlan = tableRegistry.get(tableName);
+    if (!groupByCols.isEmpty() && hasCountStar) {
+        List<Attribute> groupingAttrs = new ArrayList<>();
+        for (String col : groupByCols) {
+            groupingAttrs.add(new Attribute(col));
+        }
+        return new Aggregate(groupingAttrs, tablePlan);
+    }
+    return tablePlan;
+}
+```
+
+关键点是 `tableRegistry.get(tableName)` 返回的 `tablePlan` 本身就是一个 `StreamingRelation`——所以解析出来的 `Aggregate` 树的子节点就是流式数据源，和 DataFrame API 生成的树一模一样。
+
+### 14.5.2 SQLContext.sql() 和 registerTable()
+
+`SQLContext` 新增了两个方法，让 SQL 查询能跑起来：
+
+```java
+// 注册表（或流式视图），供 SQL 查询引用
+public void registerTable(String tableName, LogicalPlan plan) {
+    tableRegistry.put(tableName, plan);
+}
+
+// 执行 SQL 查询，返回 DataFrame
+public DataFrame sql(String sqlText) {
+    LogicalPlan plan = sqlParser.parse(sqlText);
+    return new DataFrame(this, plan);
+}
+```
+
+这和 Spark 1.3 的 `SQLContext.sql()` 是同一个模式：
+
+```scala
+// Spark 1.3 源码
+def sql(sqlText: String): DataFrame = DataFrame(this, parseSql(sqlText))
+```
+
+`registerTable("words", source.toDF().logicalPlan())` 把 `StreamingRelation` 放入表注册表，`sql("SELECT ... FROM words ...")` 从注册表里找到 `StreamingRelation`，构建出和 DataFrame API 完全相同的逻辑计划树。
+
+这就证明了：**DataFrame API 和 SQL 是同一棵树的两张面具。** 无论你用哪种语法写查询，引擎做的事都一样。
+
+## 14.6 三个基础对象：Offset、Batch、Source/Sink 接口
 
 在拆 `StreamExecution` 之前，先看它依赖的三个基础对象。它们很小，但概念上要清楚，因为它们构成了 Structured Streaming 的"数据模型"。
 
-### 14.5.1 Offset：流中的"读到哪了"
+### 14.6.1 Offset：流中的"读到哪了"
 
 偏移量是流计算进度管理的核心。它回答一个简单的问题：**这条流已经处理到哪个位置了？**
 
@@ -260,7 +350,7 @@ public record LongOffset(long offset) implements Offset {
 
 Spark 里真实的数据源偏移量比这复杂得多——Kafka 的 offset 是 `(topic, partition, offset)` 三元组，文件源是文件路径 + 行号。但不管多复杂，它都遵循同一个接口：**能比较大小，能知道从哪里继续读。**
 
-### 14.5.2 Batch：一个微批
+### 14.6.2 Batch：一个微批
 
 一个微批 = 一个偏移量 + 一个 DataFrame：
 
@@ -275,7 +365,7 @@ public record Batch(Offset end, DataFrame data) {
 
 `end` 是这批数据对应的偏移量，`data` 是这批数据本身。`Batch` 不记录"起始偏移量"，因为起始偏移量由上一批的 `end` 决定，不需要在每个 `Batch` 里重复存。
 
-### 14.5.3 Source：数据从哪来
+### 14.6.3 Source：数据从哪来
 
 ```java
 public interface Source {
@@ -295,7 +385,7 @@ getCurrentOffset()—— 当前数据源的最新偏移量是多少？
 
 `getNextBatch` 的 `start` 参数是 `Optional<Offset>`。空表示"从头开始"，有值表示"从这个偏移量之后继续读"。返回也是 `Optional<Batch>`：有新数据就返回一个 `Batch`，没有就返回空。
 
-### 14.5.4 Sink：结果写到哪
+### 14.6.4 Sink：结果写到哪
 
 ```java
 public interface Sink {
@@ -313,7 +403,7 @@ flowchart LR
     S[Source<br/>getNextBatch] --> DF["DataFrame<br/>groupBy.count"] --> SK[Sink<br/>addBatch]
 ```
 
-## 14.6 MemoryStream：用内存模拟一条流
+## 14.7 MemoryStream：用内存模拟一条流
 
 `MemoryStream` 是对 `Source` 接口的最简单实现。它内部维护一个 `List<Batch>`，用户通过 `addData()` 往里加数据，引擎通过 `getNextBatch()` 往外取数据。
 
@@ -393,7 +483,7 @@ public class MemorySink implements Sink {
 
 它额外提供了 `allData()` 和 `batchCount()` 两个方法，方便测试时检查结果。
 
-## 14.8 StreamingRelation：逻辑计划里的流式叶子节点
+## 14.9 StreamingRelation：逻辑计划里的流式叶子节点
 
 第 12 章的逻辑计划树，叶子节点是 `Scan`——它内部有一个静态 RDD，`children()` 返回空列表：
 
@@ -423,7 +513,7 @@ public record StreamingRelation(Source source) implements LogicalPlan {
 
 这就引出了核心问题：**逻辑计划树里有一个 `StreamingRelation`，它不能直接跑。怎么把它变成能跑的实际数据？**
 
-## 14.9 StreamExecution：把流式节点替换成实际数据
+## 14.10 StreamExecution：把流式节点替换成实际数据
 
 `StreamExecution` 是这一章的核心。它的职责是：在逻辑计划树里找到 `StreamingRelation`，把它替换成当前批次的实际数据（`Scan`），然后走第 12 章的优化→执行→落 RDD 整条链路。
 
@@ -558,11 +648,11 @@ if (logicalPlan instanceof StreamingRelation sr) {
 
 真实 Spark 里，偏移量不仅要记在内存里（`streamProgress`），还要写到 WAL 或 checkpoint 目录——因为 Driver 重启后，内存里的偏移量就没了，得从持久化存储里恢复。本章只做内存版本，概念路径是一样的。
 
-### 14.9.3 写入 Sink：收尾
+### 14.10.3 写入 Sink：收尾
 
 第 4 步把 `queryExecution.executed().execute().collect()` 的结果包成 DataFrame，写入 `Sink.addBatch()`。这几行代码和第 12 章 `df.collect()` 几乎一样，只是多了一层 `Sink` 的包装。
 
-## 14.10 StructuredStreaming 入口：把查询和 Sink 绑在一起
+## 14.11 StructuredStreaming 入口：把查询和 Sink 绑在一起
 
 `StructuredStreaming` 是入口类，类似于第 11 章的 `StreamingContext`。它负责创建 `StreamExecution` 引擎：
 
@@ -580,7 +670,7 @@ public class StructuredStreaming {
 
 `startQuery` 接收一个 `DataFrame`（流式查询的结果）和一个 `Sink`，创建 `StreamExecution`。之后用户通过 `execution.advance()` 手动推进，或者将来可以改成定时器自动推进。
 
-## 14.11 两张图对照：DStream 与 Structured Streaming
+## 14.12 两张图对照：DStream 与 Structured Streaming
 
 第 11 章和第 14 章都实现了流式 WordCount。把它们的执行模型并排放在一起：
 
@@ -604,7 +694,7 @@ Structured Streaming 那条线，用户只写了 `groupBy("word").count()`。引
 
 | 对比维度 | DStream（第 11 章） | Structured Streaming（第 14 章） |
 |---|---|---|
-| 编程模型 | RDD 变换（`map`、`flatMap`、`reduceByKey`） | DataFrame 声明式查询（`groupBy`、`count`） |
+| 编程模型 | RDD 变换（`map`、`flatMap`、`reduceByKey`） | DataFrame API（`groupBy`、`count`）和 SQL 字符串 |
 | 数据模型 | 每个时间点一个 RDD | 每个微批一个 DataFrame |
 | 优化器 | 无（RDD lambda 是黑箱） | 有（Catalyst 规则优化） |
 | 输入抽象 | `InputDStream`（需要自己实现） | `Source` 接口（`getNextBatch`） |
@@ -613,7 +703,7 @@ Structured Streaming 那条线，用户只写了 `groupBy("word").count()`。引
 | 执行引擎 | 每个 batch 提交一个 job | 替换流式节点 → 走 `executePlan` |
 | 与批处理的关系 | 同一套 RDD 底座 | 同一套 RDD 底座 + 同一套 SQL 引擎 |
 
-## 14.12 源码入口（选读）
+## 14.13 源码入口（选读）
 
 Structured Streaming 在 Spark 2.0 开始引入，相关源码在 `sql/core/src/main/scala/org/apache/spark/sql/execution/streaming/` 下：
 
@@ -631,9 +721,16 @@ Structured Streaming 在 Spark 2.0 开始引入，相关源码在 `sql/core/src/
 > sql/core/src/main/scala/org/apache/spark/sql/execution/streaming/MemorySink.scala
 > ```
 >
-> 真实 Spark 的 `StreamExecution` 比本章复杂很多：它包含触发器（Trigger）、多数据源协调、WAL 和 checkpoint 持久化、watermark 和事件时间处理、状态存储（StateStore）等。但核心骨架——"替换流式节点 → 优化 → 执行 → 写入 Sink"——和本章是一致的。
+> SQL 解析器的入口在 Spark 1.3（`branch-1.3`）：
+>
+> ```te4t
+> sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/AbstractSparkSQLParser.scala
+> sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/SqlParser.scala
+> ```
+>
+> 真实 Spark 的 `StreamExecution` 比本章复杂很多：它包含触发器（Trigger）、多数据源协调、WAL 和 checkpoint 持久化、watermark 和事件时间处理、状态存储（StateStore）等。但核心骨架——"替换流式节点 → 优化 → 执行 → 写入 Sink"——和本章是一致的。SQL 解析器也更复杂——Spark 1.3 用 Scala 的 `StandardTokenParsers`，Spark 2.0+ 改用 ANTLR 生成全功能 SQL 解析器——但本章的递归下降骨架和它们概念上是同源的。
 
-## 14.13 本章小结
+## 14.14 本章小结
 
 这一章做的事，一句话总结：
 

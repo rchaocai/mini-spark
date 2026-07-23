@@ -35,5 +35,6 @@
     <module>ch11-streaming</module>
     <module>ch12-dataframe-future</module>
     <module>ch13-real-spark</module>
+    <module>ch14-structured-streaming</module>
   </modules>
 </project>

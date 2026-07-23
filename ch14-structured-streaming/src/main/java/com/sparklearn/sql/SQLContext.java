@@ -7,7 +7,9 @@ import com.sparklearn.sql.catalyst.plans.logical.LogicalPlan;
 import com.sparklearn.sql.catalyst.plans.logical.Scan;
 import com.sparklearn.sql.execution.PhysicalPlanner;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -18,6 +20,8 @@ public final class SQLContext {
     private final SparkContext sparkContext;
     private final Optimizer optimizer = new Optimizer();
     private final PhysicalPlanner physicalPlanner = new PhysicalPlanner();
+    private final Map<String, LogicalPlan> tableRegistry = new HashMap<>();
+    private final SqlParser sqlParser = new SqlParser(tableRegistry);
 
     public SQLContext(SparkContext sparkContext) {
         this.sparkContext = Objects.requireNonNull(sparkContext, "sparkContext");
@@ -40,5 +44,23 @@ public final class SQLContext {
     public QueryExecution executePlan(LogicalPlan logicalPlan) {
         LogicalPlan optimized = optimizer.optimize(logicalPlan);
         return new QueryExecution(logicalPlan, optimized, physicalPlanner.plan(optimized));
+    }
+
+    /**
+     * 执行 SQL 查询，返回 DataFrame。
+     * <p>
+     * 参考 Spark 1.3 {@code SQLContext.sql()}：
+     * <pre>def sql(sqlText: String): DataFrame = DataFrame(this, parseSql(sqlText))</pre>
+     */
+    public DataFrame sql(String sqlText) {
+        LogicalPlan plan = sqlParser.parse(sqlText);
+        return new DataFrame(this, plan);
+    }
+
+    /**
+     * 注册表（或流式视图），供 SQL 查询引用。
+     */
+    public void registerTable(String tableName, LogicalPlan plan) {
+        tableRegistry.put(tableName, plan);
     }
 }
