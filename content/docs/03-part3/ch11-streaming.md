@@ -439,50 +439,56 @@ public Optional<RDD<T>> compute(Time validTime) {
 
 那"按时间点取数据"到底存不存在？存在——但不在队列这种**预先塞好**的数据源里，而在**真实从外面进来**的数据源里：数据按它到达的时刻，被分到不同的 batch。下面这第二个输入流 `SocketInputDStream` 就是这种。
 
-**从 socket 读行的输入流。** `SocketInputDStream` 连到一个 `host:port`，把对方一行行发来的文本接成一条流。它的数据不是预先备好的，而是**实时到达**的。看它的 `compute` 怎么把"到达"和"时间点"绑起来：
+**从 socket 读行的输入流。** `SocketInputDStream` 连到一个 `host:port`，把对方一行行发来的文本接成一条流。它的数据不是预先备好的，而是**实时到达**的。这里有两件事：一件是"按 batch 把到达的数据包成 RDD"——输入流的活；一件是"连上 socket、把字节一行行读进来"——真正去拿数据的活。这两件事分给两个对象：`SocketInputDStream` 只管前者，后者交给一个 `SocketReceiver`。
+
+`SocketInputDStream` 自己不碰 socket，它持有一个 receiver，`start` / `compute` / `stop` 都转给它：
 
 ```java
-public Optional<RDD<String>> compute(Time validTime) {
-    List<String> drained = new ArrayList<>();
-    buffer.drainTo(drained);                       // 把缓冲里目前攒到的行一次性排空
+public Optional<RDD<T>> compute(Time validTime) {
+    List<T> drained = new ArrayList<>();
+    receiver.drainTo(drained);                     // 把 receiver 攒到的对象一次性排空
     if (drained.isEmpty()) {
         return Optional.empty();                   // 这一阵没来数据：这个 batch 不交 RDD
     }
     return Optional.of(context().sparkContext().parallelize(drained, 1));
 }
+
+public void start() { receiver.start(); }           // 图启动时由 DStreamGraph 调
+public void stop()  { receiver.stop(); }
 ```
 
-同样不读 `validTime`，但不读的原因和队列流不同：队列流是"按进队顺序取一个"，socket 流是"取这一阵子到达的全部"。`buffer` 是一个缓冲队列，`drainTo` 把里面**到目前为止攒下的行**一次性倒出来——攒了什么、攒了多少，取决于上一次排空之后又来了什么。
+`compute` 同样不读 `validTime`，但不读的原因和队列流不同：队列流是"按进队顺序取一个"，socket 流是"取这一阵子到达的全部"。`receiver.drainTo` 把 receiver 里**到目前为止攒下的对象**一次性倒出来——攒了什么、攒了多少，取决于上一次排空之后又来了什么。
 
-缓冲里的行是谁、什么时候放进去的？是 `start()` 起的一个**后台线程**，它一直堵在 socket 上读，每读到一行就塞进缓冲：
+攒数据的活在 `SocketReceiver` 这一边。它连上 socket，起一个后台线程堵着读，每读到一个对象就 `push` 进自己的缓冲：
 
 ```java
-public void start() {
+protected void onStart() throws Exception {
     socket = new Socket(host, port);
-    reader = new Thread(this::readLoop, "socket-input-" + port);
+    reader = new Thread(this::readLoop, "socket-receiver-" + port);
     reader.setDaemon(true);
     reader.start();
 }
 
 private void readLoop() {
-    try (BufferedReader in = ...) {
-        String line;
-        while ((line = in.readLine()) != null) {
-            buffer.add(line);                      // 来一行、攒一行，跟 batch 节拍无关
-        }
+    try {
+        deserializer.read(socket.getInputStream(), this::push);   // 读一个、push 一个
     } catch (Exception ignored) { }
 }
 ```
 
-`start()` 是 `InputDStream` 上的钩子，图启动时由 `DStreamGraph` 调一次。它连上 socket，再起一个守护线程跑 `readLoop`。这个线程的节奏完全由 socket 那头决定——对方发得快它就读得快，发了才读，**和 batch 的时间节拍互不相干**。`compute` 则按 batch 节拍被调度器调，每次把缓冲排空一次。一个只管往里攒，一个按点往外清，两边各走各的节奏，缓冲就是它们碰头的地方：
+中间这行 `deserializer.read(...)` 是一条可以替换的缝：socket 来的是字节，字节怎么变成一条条对象，由一个 `Deserializer` 决定。`socketTextStream` 接的 `bytesToLines` 就是其中一种——按 UTF-8 把字节切成一行行字符串，读一行、发一行；换成按别的格式切，receiver 这套读取和缓冲照样能用。
+
+`onStart` / `onStop` 是 `Receiver` 上的钩子，`SocketInputDStream.start` 调 `receiver.start()` 时触发。这个读取线程的节奏完全由 socket 那头决定——对方发得快它就读得快，发了才读，**和 batch 的时间节拍互不相干**。`compute` 则按 batch 节拍被调度器调，每次把缓冲排空一次。receiver 只管往里攒，DStream 按点往外清，两边各走各的节奏，缓冲就是它们碰头的地方：
 
 ```mermaid
 flowchart LR
-    S(["TCP socket"]) -- "一行行到达" --> R["后台读取线程<br/>读一行、塞一行"]
-    R --> B["缓冲 BlockingQueue"]
+    S(["TCP socket"]) -- "一行行到达" --> R["SocketReceiver 后台线程<br/>读一行、push 一行"]
+    R --> B["receiver 的缓冲"]
     B -- "每个 batch 到点：<br/>compute 用 drainTo 排空" --> RDD["包成一个 RDD"]
     RDD --> J["这个 batch 的 job"]
 ```
+
+顺带说一处和真实 Spark 的差别：Spark 的 receiver 读到对象后，交给 `BlockGenerator` 攒成一块块、存进 `BlockManager`，`compute` 再按 batch 把这些块拼成一个 `BlockRDD`——块是存储和并行度的单位，还能复制来容错。这里没有 `BlockManager`，receiver 直接攒进自己的缓冲、`compute` 直接排空，省掉了切块和存储那一层；但"后台攒、按 batch 取"这两个角色是一致的。
 
 这么一摆，"按时间点取数据"就落到了实处：每个 batch 的 RDD，装的就是**从上一次排空到这一次之间、新到达的那些行**。这一段时间里没来数据，`drainTo` 倒出来是空的，`compute` 返回 `empty`，这个 batch 就不产生 job。
 

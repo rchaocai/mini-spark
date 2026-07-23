@@ -6,12 +6,9 @@ import com.sparklearn.streaming.Receiver;
 import com.sparklearn.streaming.StreamingContext;
 import com.sparklearn.streaming.Time;
 
-import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
-import java.util.function.Function;
 
 /**
  * 从 TCP socket 读对象的输入流。它自己不碰 socket，把读取交给一个 SocketReceiver；
@@ -27,9 +24,9 @@ public final class SocketInputDStream<T> extends InputDStream<T> {
             StreamingContext ssc,
             String host,
             int port,
-            Function<InputStream, Iterator<T>> bytesToObjects) {
+            Deserializer<T> deserializer) {
         super(ssc);
-        this.receiver = new SocketReceiver<>(host, port, bytesToObjects);
+        this.receiver = new SocketReceiver<>(host, port, deserializer);
     }
 
     @Override
