@@ -1,5 +1,6 @@
 package com.sparklearn.sql.catalyst.expressions;
 
+import com.sparklearn.sql.DataType;
 import com.sparklearn.sql.Row;
 
 import java.util.Set;
@@ -25,5 +26,10 @@ public record Literal(Object value) implements Expression {
             return "'" + text + "'";
         }
         return String.valueOf(value);
+    }
+
+    @Override
+    public DataType dataType() {
+        return DataType.infer(value);
     }
 }

@@ -1,5 +1,6 @@
 package com.sparklearn.sql.catalyst.expressions;
 
+import com.sparklearn.sql.DataType;
 import com.sparklearn.sql.Row;
 
 import java.util.LinkedHashSet;
@@ -32,6 +33,11 @@ public record GreaterThan(Expression left, Expression right) implements Expressi
     @Override
     public String sql() {
         return left.sql() + " > " + right.sql();
+    }
+
+    @Override
+    public DataType dataType() {
+        return DataType.BOOLEAN;
     }
 
     @Override

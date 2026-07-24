@@ -60,7 +60,7 @@ public record HashAggregateExec(List<Attribute> groupingExpressions, PhysicalPla
                 result.put(names.get(index), values.get(index));
             }
             result.put("count", count);
-            return new Row(result);
+            return Row.of(result);
         }
     }
 }

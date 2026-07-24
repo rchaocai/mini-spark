@@ -24,7 +24,7 @@ public record ProjectExec(List<NamedExpression> projectList, PhysicalPlan child)
             for (NamedExpression expression : projectList) {
                 values.put(expression.name(), expression.eval(row));
             }
-            return new Row(values);
+            return Row.of(values);
         });
     }
 

@@ -1,5 +1,6 @@
 package com.sparklearn.sql.catalyst.expressions;
 
+import com.sparklearn.sql.DataType;
 import com.sparklearn.sql.Row;
 
 import java.io.Serializable;
@@ -16,6 +17,14 @@ public sealed interface Expression extends Serializable
     Set<String> references();
 
     String sql();
+
+    /**
+     * 返回表达式的结果类型。
+     * <p>
+     * 在 Spark 中，类型推断由 Catalyst 的 Analyzer 阶段完成。
+     * 本教学实现简化为在每个表达式中直接推断。
+     */
+    DataType dataType();
 
     default Expression transform(ExpressionRule rule) {
         return rule.apply(this);

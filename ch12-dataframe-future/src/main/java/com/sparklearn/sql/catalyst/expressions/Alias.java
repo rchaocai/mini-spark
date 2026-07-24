@@ -1,5 +1,6 @@
 package com.sparklearn.sql.catalyst.expressions;
 
+import com.sparklearn.sql.DataType;
 import com.sparklearn.sql.Row;
 
 import java.util.Set;
@@ -22,6 +23,11 @@ public record Alias(Expression child, String name) implements NamedExpression {
     @Override
     public String sql() {
         return child.sql() + " AS " + name;
+    }
+
+    @Override
+    public DataType dataType() {
+        return child.dataType();
     }
 
     @Override

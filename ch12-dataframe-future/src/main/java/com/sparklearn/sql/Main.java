@@ -8,6 +8,12 @@ import static com.sparklearn.sql.catalyst.expressions.Expressions.col;
 
 /**
  * 第 12 章 · 从 RDD 到 DataFrame 演示入口。
+ *
+ * <p>通过两个典型需求展示 DataFrame API 的使用：
+ * <ul>
+ *   <li>需求一：过滤 + 投影，演示谓词下推和列裁剪</li>
+ *   <li>需求二：分组聚合，演示 Aggregate 落回 RDD.reduceByKey</li>
+ * </ul>
  */
 public final class Main {
 
@@ -34,6 +40,8 @@ public final class Main {
             System.out.println(adjustedSalary.explainString());
             System.out.println("结果：");
             adjustedSalary.show();
+            // 预期结果：Alice(90000)、Cathy(103750)、David(63750)、Frank(83750)
+            // Bob(45000) 和 Eva(39000) 因薪水低于 50000 被过滤
 
             System.out.println("\n" + "=".repeat(72));
             System.out.println("需求二：统计薪水 > 50000 的员工，按部门分组计数。");
@@ -47,6 +55,8 @@ public final class Main {
             System.out.println(departmentCounts.explainString());
             System.out.println("结果：");
             departmentCounts.show();
+            // 预期结果：eng=2, sales=1, ops=1
+            // 底层使用 RDD.reduceByKey，会触发 Shuffle
 
             // ---- SQL 演示 ----
             System.out.println("\n" + "=".repeat(72));
@@ -68,10 +78,23 @@ public final class Main {
         System.out.println(result.explainString());
         System.out.println("结果：");
         result.show();
+        // 预期结果：每个部门 2 人（未过滤薪水）
+        // SQL 解析后生成与 DataFrame API 相同的 LogicalPlan
+
+        System.out.println("\nSQL 查询（带 WHERE）：SELECT department, count(*) FROM employees WHERE salary > 50000 GROUP BY department\n");
+
+        DataFrame filteredResult = sql.sql("SELECT department, count(*) FROM employees WHERE salary > 50000 GROUP BY department");
+        System.out.println(filteredResult.explainString());
+        System.out.println("结果：");
+        filteredResult.show();
+        // 预期结果：eng=2, sales=1, ops=1（过滤掉薪水低于 50000 的员工）
 
         System.out.println("\nSQL 和 DataFrame API 生成的逻辑计划一模一样。");
     }
 
+    /**
+     * 测试数据：6 名员工，包含 id、name、department、salary 四个字段。
+     */
     private static List<Row> employees() {
         return List.of(
                 Row.of("id", 1, "name", "Alice", "department", "eng", "salary", 72_000),
