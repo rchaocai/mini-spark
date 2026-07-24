@@ -89,7 +89,7 @@ public final class Main {
         filteredResult.show();
         // 预期结果：eng=2, sales=1, ops=1（过滤掉薪水低于 50000 的员工）
 
-        System.out.println("\nSQL 和 DataFrame API 生成的逻辑计划一模一样。");
+        System.out.println("\nSQL 和 DataFrame API 会汇到同一种逻辑计划树。");
     }
 
     /**

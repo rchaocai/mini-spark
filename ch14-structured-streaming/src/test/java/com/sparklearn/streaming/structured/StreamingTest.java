@@ -10,8 +10,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
+import static com.sparklearn.sql.catalyst.expressions.Expressions.col;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -79,6 +82,18 @@ class StreamingTest {
         assertEquals("a", rows.get(0).get("word"));
         assertEquals("b", rows.get(1).get("word"));
         assertEquals("c", rows.get(2).get("word"));
+    }
+
+    @Test
+    void testMemoryStreamAppliesSourceSchemaToPositionalRows() {
+        MemoryStream stream = new MemoryStream(sqlContext, wordSchema);
+        stream.addData(List.of(Row.apply("hello")));
+
+        var batch = stream.getNextBatch(Optional.empty());
+        assertTrue(batch.isPresent());
+        List<Row> rows = batch.get().data().collect();
+        assertEquals("hello", rows.get(0).get("word"));
+        assertEquals(List.of("word"), rows.get(0).fieldNames());
     }
 
     @Test
@@ -185,6 +200,54 @@ class StreamingTest {
 
         List<Row> results = sink.allData();
         assertEquals(2, results.size()); // hello 和 world 两组
+        Map<String, Long> counts = results.stream()
+                .collect(Collectors.toMap(
+                        row -> (String) row.get("word"),
+                        row -> (Long) row.get("count")));
+        assertEquals(Map.of("hello", 2L, "world", 1L), counts);
+    }
+
+    @Test
+    void testStreamExecutionWritesEmptyResultWithoutFakeRow() {
+        MemoryStream source = new MemoryStream(sqlContext, wordSchema);
+        MemorySink sink = new MemorySink();
+
+        var resultDF = source.toDF()
+                .where(col("word").eqTo("missing"))
+                .select(col("word"));
+        var execution = new StreamExecution(sqlContext, resultDF.logicalPlan(), sink);
+
+        source.addData(List.of(Row.of("word", "hello")));
+        boolean progressed = execution.advance();
+
+        assertTrue(progressed);
+        assertEquals(1, sink.batchCount());
+        assertEquals(0, ((LongOffset) sink.currentOffset().orElseThrow()).offset());
+        assertEquals(List.of(), sink.allData());
+    }
+
+    @Test
+    void testSqlStreamingWordCountUsesSamePlanShape() {
+        MemoryStream source = new MemoryStream(sqlContext, wordSchema);
+        sqlContext.registerTable("words", source.toDF().logicalPlan());
+        MemorySink sink = new MemorySink();
+
+        var resultDF = sqlContext.sql("SELECT word, count(*) FROM words GROUP BY word");
+        assertTrue(resultDF.logicalPlan().treeString().contains("StreamingRelation"));
+        var execution = new StreamExecution(sqlContext, resultDF.logicalPlan(), sink);
+
+        source.addData(List.of(
+                Row.of("word", "hello"),
+                Row.of("word", "world"),
+                Row.of("word", "hello")
+        ));
+        execution.advance();
+
+        Map<String, Long> counts = sink.allData().stream()
+                .collect(Collectors.toMap(
+                        row -> (String) row.get("word"),
+                        row -> (Long) row.get("count")));
+        assertEquals(Map.of("hello", 2L, "world", 1L), counts);
     }
 
     @Test

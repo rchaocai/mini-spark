@@ -2,6 +2,7 @@ package com.sparklearn.sql;
 
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -179,7 +180,7 @@ public final class Row implements Serializable {
         for (Map.Entry<String, Integer> entry : nameToIndex.entrySet()) {
             map.put(entry.getKey(), values[entry.getValue()]);
         }
-        return Map.copyOf(map);
+        return Collections.unmodifiableMap(map);
     }
 
     /**

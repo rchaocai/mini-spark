@@ -5,6 +5,7 @@ import com.sparklearn.sql.catalyst.plans.logical.Filter;
 import com.sparklearn.sql.catalyst.plans.logical.LogicalPlan;
 import com.sparklearn.sql.catalyst.plans.logical.Project;
 import com.sparklearn.sql.catalyst.plans.logical.Scan;
+import com.sparklearn.streaming.structured.StreamingRelation;
 
 /**
  * 把优化后的逻辑计划翻译成物理计划。
@@ -29,6 +30,11 @@ public final class PhysicalPlanner {
             return new HashAggregateExec(
                     aggregate.groupingExpressions(),
                     plan(aggregate.child()));
+        }
+        if (logicalPlan instanceof StreamingRelation streamingRelation) {
+            throw new IllegalStateException(
+                    "StreamingRelation should be replaced before physical planning. "
+                            + "Source: " + streamingRelation.source());
         }
         throw new IllegalArgumentException("unknown logical plan: " + logicalPlan);
     }

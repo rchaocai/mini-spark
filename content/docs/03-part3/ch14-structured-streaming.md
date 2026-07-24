@@ -111,7 +111,9 @@ flowchart TB
 
 这是一张**无界表（unbounded table）**——没有"最后一行"，数据一直在追加。每个微批到来时，新数据被追加到表里，然后对整张表跑一次查询。
 
-但这里有一个关键简化：**每个微批的查询只算当前批新到的数据，而不是从头扫全表。** 这在 Spark 的术语里叫"append 模式"——一个微批处理完，结果追加到 Sink，下一个微批只处理新数据。本章的 `StreamExecution.advance()` 实现的正是这个模式：每次只从 Source 取新数据，对这批新数据跑查询，结果写入 Sink。
+真实 Spark 会在"无界表"语义上继续往前走：遇到跨批聚合时，它需要状态存储记录历史结果，再配合输出模式决定每个触发周期写出哪些行。
+
+本章先做一个更小的教学版：**每个微批只取当前新到的数据，对这一批独立跑一次 DataFrame 查询，然后把结果追加到 Sink。** 所以这里的 `groupBy("word").count()` 统计的是"当前微批里的 word count"，不是"从流开始到现在的全局累计 word count"。这样可以先看清 Structured Streaming 如何复用 DataFrame 引擎，而不把 StateStore、watermark、checkpoint 一次塞进来。
 
 > [!INFO]
 > **Spark 的三种输出模式**
@@ -121,7 +123,7 @@ flowchart TB
 > - **Complete**：每次把整张表的最新结果全部写回 Sink（适合有状态聚合）
 > - **Update**：只写更新过的行
 >
-> 本章只实现 Append，它最直接，也最接近微批的直觉：来一批，算一批，写一批。
+> 本章只实现一个近似 Append 的教学路径：来一批，算这一批，写这一批。完整 Spark 里的聚合查询通常还要状态存储配合 Update 或 Complete 输出模式；本章暂不实现。
 
 ## 14.3 先跑起来：流式 WordCount
 
@@ -152,7 +154,7 @@ Aggregate(groupBy=[word], count(*))
 
 这棵树和第 12 章的聚合查询几乎一样，只差一个地方：最底下的叶子节点不是 `Scan(employees)`，而是 `StreamingRelation(MemoryStream[...])`。`Scan` 对着一个静态 RDD，`StreamingRelation` 对着一个会不断有新数据到来的 `Source`。
 
-程序跑起来，三个批次的结果是这样的：
+程序跑起来，三个批次的结果大致是这样的。中间的 Stage / Task 调度日志先省略，只看 Sink 里的数据：
 
 ```text
 --- 第 1 批数据 ---
@@ -207,7 +209,7 @@ source.addData(List.of(
 execution.advance();
 ```
 
-步骤 1 和 2 和第 12 章一模一样：定义 schema，构建 DataFrame，链式调用 `groupBy().count()`。唯一的区别是 `source.toDF()` 返回的 DataFrame 底层不是 `Scan`，而是 `StreamingRelation`。
+步骤 1 和 2 和第 12 章很像：定义 schema，构建 DataFrame，链式调用 `groupBy().count()`。唯一的区别是 `source.toDF()` 返回的 DataFrame 底层不是 `Scan`，而是 `StreamingRelation`。
 
 步骤 3 和 4 创建了一个 `MemorySink`（内存接收器），然后用 `StructuredStreaming.startQuery()` 把查询和 Sink 绑在一起，得到一个 `StreamExecution`。
 
@@ -226,7 +228,7 @@ sql.registerTable("words", source.toDF().logicalPlan());
 DataFrame resultDF = sql.sql("SELECT word, count(*) FROM words GROUP BY word");
 ```
 
-这两行生成的逻辑计划和 `groupBy("word").count()` 完全一样：
+这两行生成的逻辑计划和 `groupBy("word").count()` 是同一种计划形状：
 
 ```text
 Aggregate(groupBy=[word], count(*))
@@ -238,7 +240,7 @@ Aggregate(groupBy=[word], count(*))
 >
 > - SQL / DataFrame 支持从 **Spark 1.3**（`branch-1.3`）开始引入，最早的 SQL 解析器在 `sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/SqlParser.scala`，用 Scala 的 `StandardTokenParsers`（parser combinator）解析 SQL 字符串转成 LogicalPlan。
 > - Structured Streaming 从 **Spark 2.0**（`branch-2.0`）开始引入，相关源码在 `sql/core/.../execution/streaming/` 下。
-> - 本章的 SqlParser 参考了 Spark 1.3 的骨架，但用 Java 手写递归下降，只覆盖 `SELECT ... FROM ... GROUP BY ...` + `count(*)` 这个教学子集。
+> - 本章的 SqlParser 参考了 Spark 1.3 的骨架，但用 Java 手写递归下降，只覆盖普通列投影、简单 `WHERE`、`GROUP BY ... + count(*)` 这个教学子集。
 
 ### 14.5.1 SqlParser：把 SQL 字符串变成 LogicalPlan
 
@@ -258,24 +260,40 @@ public LogicalPlan parse(String sql) {
 }
 ```
 
-`tokenize` 把 SQL 字符串按空格、逗号、括号切成 token 列表。`parseSelect` 用递归下降识别 `SELECT ... FROM ... GROUP BY ...` 结构，最后调用 `buildPlan` 组装 LogicalPlan：
+`tokenize` 把 SQL 字符串按空格、逗号、括号切成 token 列表。`parseSelect` 用递归下降识别 `SELECT ... FROM ... [WHERE ...] [GROUP BY ...]` 结构，最后调用 `buildPlan` 组装 LogicalPlan：
 
 ```java
 private LogicalPlan buildPlan(String tableName, List<String> selectCols,
-                               boolean hasCountStar, List<String> groupByCols) {
+                               boolean hasCountStar, List<String> groupByCols,
+                               Expression whereCondition) {
     LogicalPlan tablePlan = tableRegistry.get(tableName);
+    LogicalPlan plan = tablePlan;
+
+    if (whereCondition != null) {
+        plan = new Filter(whereCondition, plan);
+    }
+
     if (!groupByCols.isEmpty() && hasCountStar) {
         List<Attribute> groupingAttrs = new ArrayList<>();
         for (String col : groupByCols) {
             groupingAttrs.add(new Attribute(col));
         }
-        return new Aggregate(groupingAttrs, tablePlan);
+        return new Aggregate(groupingAttrs, plan);
     }
-    return tablePlan;
+
+    if (!selectCols.isEmpty()) {
+        List<NamedExpression> projectList = new ArrayList<>();
+        for (String col : selectCols) {
+            projectList.add(new Attribute(col));
+        }
+        return new Project(projectList, plan);
+    }
+
+    return plan;
 }
 ```
 
-关键点是 `tableRegistry.get(tableName)` 返回的 `tablePlan` 本身就是一个 `StreamingRelation`——所以解析出来的 `Aggregate` 树的子节点就是流式数据源，和 DataFrame API 生成的树一模一样。
+关键点是 `tableRegistry.get(tableName)` 返回的 `tablePlan` 本身就是一个 `StreamingRelation`——所以解析出来的 `Project`、`Filter` 或 `Aggregate` 树下面接的仍然是流式数据源，和 DataFrame API 生成的是同一套逻辑计划节点。
 
 ### 14.5.2 SQLContext.sql() 和 registerTable()
 
@@ -301,9 +319,9 @@ public DataFrame sql(String sqlText) {
 def sql(sqlText: String): DataFrame = DataFrame(this, parseSql(sqlText))
 ```
 
-`registerTable("words", source.toDF().logicalPlan())` 把 `StreamingRelation` 放入表注册表，`sql("SELECT ... FROM words ...")` 从注册表里找到 `StreamingRelation`，构建出和 DataFrame API 完全相同的逻辑计划树。
+`registerTable("words", source.toDF().logicalPlan())` 把 `StreamingRelation` 放入表注册表，`sql("SELECT ... FROM words ...")` 从注册表里找到 `StreamingRelation`，再按 SQL 子句构建同一套逻辑计划节点。
 
-这就证明了：**DataFrame API 和 SQL 是同一棵树的两张面具。** 无论你用哪种语法写查询，引擎做的事都一样。
+这就证明了：**DataFrame API 和 SQL 会汇到同一种计划树。** 无论你用哪种语法写查询，后面的流式替换、优化和物理执行都走同一条路。
 
 ## 14.6 三个基础对象：Offset、Batch、Source/Sink 接口
 
@@ -414,14 +432,14 @@ public class MemoryStream implements Source {
 
     public synchronized Offset addData(List<Row> rows) {
         currentOffset = currentOffset.increment();
-        DataFrame df = sqlContext.createDataFrame("memory", rows, 1);
+        DataFrame df = sqlContext.createDataFrame("memory", rows, sourceSchema, 1);
         batches.add(new Batch(currentOffset, df));
         return currentOffset;
     }
 }
 ```
 
-`addData` 做了三件事：偏移量 +1，把 rows 包成 DataFrame，存入 `batches` 列表。要注意 `synchronized`——真实场景里，数据到达和引擎读取可能发生在不同线程。
+`addData` 做了三件事：偏移量 +1，把 rows 按 `sourceSchema` 包成 DataFrame，存入 `batches` 列表。这里既可以传 `Row.of("word", "hello")` 这种带字段名的行，也可以传 `Row.apply("hello")` 这种只按位置给值的行；显式 schema 会把第 0 个值对应到 `word` 列。要注意 `synchronized`——真实场景里，数据到达和引擎读取可能发生在不同线程。
 
 `getNextBatch` 做的是"从某个偏移量之后，把所有新数据合并成一批，返回"：
 
@@ -441,7 +459,7 @@ public synchronized Optional<Batch> getNextBatch(Optional<Offset> start) {
         allRows.addAll(batches.get((int) i).data().collect());
     }
 
-    DataFrame combined = sqlContext.createDataFrame("memory", allRows, 1);
+    DataFrame combined = sqlContext.createDataFrame("memory", allRows, sourceSchema, 1);
     return Optional.of(new Batch(currentOffset, combined));
 }
 ```
@@ -458,7 +476,7 @@ public DataFrame toDF() {
 
 这就是"把流接进 DataFrame 查询树"的关键一步。
 
-## 14.7 MemorySink：用内存存所有结果
+## 14.8 MemorySink：用内存存所有结果
 
 `MemorySink` 是 `Sink` 接口的最简单实现，把所有批次的结果都存下来：
 
@@ -562,7 +580,7 @@ public boolean advance() {
     Offset batchEnd = result.newOffsets().values().iterator().next();
     if (rows.isEmpty()) {
         sink.addBatch(new Batch(batchEnd,
-                sqlContext.createDataFrame("stream_result", List.of(Row.of()), 1)));
+                sqlContext.createDataFrame("stream_result", List.of(), result.plan().schema(), 1)));
     } else {
         DataFrame resultDf = sqlContext.createDataFrame("stream_result", rows, 1);
         sink.addBatch(new Batch(batchEnd, resultDf));
@@ -582,7 +600,7 @@ public boolean advance() {
 第 4 步：写入 Sink → 结果持久化
 ```
 
-### 14.9.1 替换流式节点：递归遍历逻辑计划树
+### 14.10.1 替换流式节点：递归遍历逻辑计划树
 
 `replaceAndCollect` 是这个引擎的"发动机"。它递归遍历整棵逻辑计划树，找到 `StreamingRelation` 节点，向 `Source` 要当前批次的数据，把 `StreamingRelation` 替换成 `Scan`（实际数据的逻辑计划）：
 
@@ -628,9 +646,9 @@ private ReplacementResult replaceAndCollect(LogicalPlan plan, Map<Source, Offset
 
 这段代码做的事，和第 12 章 Catalyst 的 `TreeNode.transformUp` 是同一类操作：**递归遍历一棵不可变树，逐层替换节点。** 区别在于，Catalyst 的规则是"匹配树形 → 改写树形"，`replaceAndCollect` 是"匹配到 `StreamingRelation` → 向 `Source` 要数据 → 替换成 `Scan`"。
 
-关键的一行是 `batch.data().logicalPlan()`。`batch.data()` 是一个 DataFrame，它的 `logicalPlan()` 是 `Scan`。所以 `StreamingRelation` 被替换成了 `Scan`——和静态表一模一样的节点。
+关键的一行是 `batch.data().logicalPlan()`。`batch.data()` 是一个 DataFrame，它的 `logicalPlan()` 是 `Scan`。所以 `StreamingRelation` 被替换成了 `Scan`——和静态表使用的是同一种叶子节点。
 
-替换完成后，整棵树里不再有 `StreamingRelation`。此时再走 `executePlan`，优化器、物理计划器看到的都是普通节点，和第 12 章完全一样。为了防止物理计划器意外碰到没替换的 `StreamingRelation`，`PhysicalPlanner` 里也加了一行显式检查：
+替换完成后，整棵树里不再有 `StreamingRelation`。此时再走 `executePlan`，优化器、物理计划器看到的都是普通节点，和第 12 章走同一条执行链路。为了防止物理计划器意外碰到没替换的 `StreamingRelation`，`PhysicalPlanner` 里也加了一行显式检查：
 
 ```java
 if (logicalPlan instanceof StreamingRelation sr) {
@@ -640,11 +658,11 @@ if (logicalPlan instanceof StreamingRelation sr) {
 }
 ```
 
-### 14.9.2 更新进度：记住处理到哪了
+### 14.10.2 更新进度：记住处理到哪了
 
 `streamProgress` 是一个 `Map<Source, Offset>`，记录每个数据源已经处理到了哪个偏移量。每次 `advance()` 成功执行后，`replaceAndCollect` 返回的 `newOffsets` 会写回 `streamProgress`。下一个微批再调用 `getNextBatch` 时，就会从上次结束的位置继续。
 
-这就是"偏移量管理"——它保证了：**不丢、不重、按顺序。**
+这就是"偏移量管理"。在本章这个单进程、内存版、Sink 写入正常成功的前提下，它能避免同一个 Source 的数据被重复读取，并让下一个微批从上次结束的位置继续。
 
 真实 Spark 里，偏移量不仅要记在内存里（`streamProgress`），还要写到 WAL 或 checkpoint 目录——因为 Driver 重启后，内存里的偏移量就没了，得从持久化存储里恢复。本章只做内存版本，概念路径是一样的。
 
@@ -723,7 +741,7 @@ Structured Streaming 在 Spark 2.0 开始引入，相关源码在 `sql/core/src/
 >
 > SQL 解析器的入口在 Spark 1.3（`branch-1.3`）：
 >
-> ```te4t
+> ```text
 > sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/AbstractSparkSQLParser.scala
 > sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/SqlParser.scala
 > ```

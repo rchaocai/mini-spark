@@ -8,6 +8,7 @@ import com.sparklearn.sql.catalyst.plans.logical.Scan;
 import com.sparklearn.sql.execution.PhysicalPlanner;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -37,11 +38,24 @@ public final class SQLContext {
                 Schema.inferFrom(rows.get(0)));
     }
 
+    public DataFrame createDataFrame(
+            String relationName,
+            List<Row> rows,
+            Schema schema,
+            int numberOfPartitions) {
+        Objects.requireNonNull(rows, "rows");
+        Objects.requireNonNull(schema, "schema");
+        return createDataFrame(
+                relationName,
+                sparkContext.parallelize(alignRowsToSchema(rows, schema), numberOfPartitions),
+                schema);
+    }
+
     public DataFrame createDataFrame(String relationName, RDD<Row> rdd, Schema schema) {
         return new DataFrame(this, new Scan(relationName, schema, rdd));
     }
 
-   public QueryExecution executePlan(LogicalPlan logicalPlan) {
+    public QueryExecution executePlan(LogicalPlan logicalPlan) {
         LogicalPlan optimized = optimizer.optimize(logicalPlan);
         return new QueryExecution(logicalPlan, optimized, physicalPlanner.plan(optimized));
     }
@@ -62,5 +76,29 @@ public final class SQLContext {
      */
     public void registerTable(String tableName, LogicalPlan plan) {
         tableRegistry.put(tableName, plan);
+    }
+
+    private List<Row> alignRowsToSchema(List<Row> rows, Schema schema) {
+        List<String> fieldNames = schema.fieldNames();
+        return rows.stream()
+                .map(row -> alignRowToSchema(row, fieldNames))
+                .toList();
+    }
+
+    private Row alignRowToSchema(Row row, List<String> fieldNames) {
+        if (row.length() != fieldNames.size()) {
+            throw new IllegalArgumentException(
+                    "row field count " + row.length()
+                            + " does not match schema field count " + fieldNames.size());
+        }
+        if (!row.fieldNames().isEmpty()) {
+            return row.select(fieldNames);
+        }
+
+        LinkedHashMap<String, Object> values = new LinkedHashMap<>();
+        for (int index = 0; index < fieldNames.size(); index++) {
+            values.put(fieldNames.get(index), row.get(index));
+        }
+        return Row.of(values);
     }
 }

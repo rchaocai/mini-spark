@@ -5,9 +5,11 @@ import com.sparklearn.sql.catalyst.expressions.EqualTo;
 import com.sparklearn.sql.catalyst.expressions.Expression;
 import com.sparklearn.sql.catalyst.expressions.GreaterThan;
 import com.sparklearn.sql.catalyst.expressions.Literal;
+import com.sparklearn.sql.catalyst.expressions.NamedExpression;
 import com.sparklearn.sql.catalyst.plans.logical.Aggregate;
 import com.sparklearn.sql.catalyst.plans.logical.Filter;
 import com.sparklearn.sql.catalyst.plans.logical.LogicalPlan;
+import com.sparklearn.sql.catalyst.plans.logical.Project;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -209,6 +211,18 @@ public final class SqlParser {
                 groupingAttrs.add(new Attribute(col));
             }
             return new Aggregate(groupingAttrs, plan);
+        }
+
+        if (hasCountStar) {
+            throw new UnsupportedOperationException("count(*) without GROUP BY is not supported in this chapter");
+        }
+
+        if (!selectCols.isEmpty()) {
+            List<NamedExpression> projectList = new ArrayList<>();
+            for (String col : selectCols) {
+                projectList.add(new Attribute(col));
+            }
+            return new Project(projectList, plan);
         }
 
         return plan;

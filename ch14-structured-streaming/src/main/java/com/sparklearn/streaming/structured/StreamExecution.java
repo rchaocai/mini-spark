@@ -71,7 +71,7 @@ public class StreamExecution {
         Offset batchEnd = result.newOffsets().values().iterator().next();
         if (rows.isEmpty()) {
             sink.addBatch(new Batch(batchEnd,
-                    sqlContext.createDataFrame("stream_result", List.of(Row.of()), 1)));
+                    sqlContext.createDataFrame("stream_result", List.of(), result.plan().schema(), 1)));
         } else {
             DataFrame resultDf = sqlContext.createDataFrame("stream_result", rows, 1);
             sink.addBatch(new Batch(batchEnd, resultDf));

@@ -38,7 +38,7 @@ public class MemoryStream implements Source {
      */
     public synchronized Offset addData(List<Row> rows) {
         currentOffset = currentOffset.increment();
-        DataFrame df = sqlContext.createDataFrame("memory", rows, 1);
+        DataFrame df = sqlContext.createDataFrame("memory", rows, sourceSchema, 1);
         batches.add(new Batch(currentOffset, df));
         return currentOffset;
     }
@@ -66,7 +66,7 @@ public class MemoryStream implements Source {
             allRows.addAll(batches.get((int) i).data().collect());
         }
 
-        DataFrame combined = sqlContext.createDataFrame("memory", allRows, 1);
+        DataFrame combined = sqlContext.createDataFrame("memory", allRows, sourceSchema, 1);
 
         return Optional.of(new Batch(currentOffset, combined));
     }
