@@ -41,7 +41,7 @@ public final class SQLContext {
         return new DataFrame(this, new Scan(relationName, schema, rdd));
     }
 
-    public QueryExecution executePlan(LogicalPlan logicalPlan) {
+   public QueryExecution executePlan(LogicalPlan logicalPlan) {
         LogicalPlan optimized = optimizer.optimize(logicalPlan);
         return new QueryExecution(logicalPlan, optimized, physicalPlanner.plan(optimized));
     }
@@ -58,7 +58,7 @@ public final class SQLContext {
     }
 
     /**
-     * 注册表（或流式视图），供 SQL 查询引用。
+     * 注册表，供 SQL 查询引用。
      */
     public void registerTable(String tableName, LogicalPlan plan) {
         tableRegistry.put(tableName, plan);

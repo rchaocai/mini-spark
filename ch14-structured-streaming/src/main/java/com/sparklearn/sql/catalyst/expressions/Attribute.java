@@ -1,5 +1,6 @@
 package com.sparklearn.sql.catalyst.expressions;
 
+import com.sparklearn.sql.DataType;
 import com.sparklearn.sql.Row;
 
 import java.util.Set;
@@ -7,7 +8,11 @@ import java.util.Set;
 /**
  * 输入行里的一个列引用。
  */
-public record Attribute(String name) implements NamedExpression {
+public record Attribute(String name, DataType dataType) implements NamedExpression {
+
+    public Attribute(String name) {
+        this(name, DataType.OBJECT);
+    }
 
     @Override
     public Object eval(Row row) {
@@ -22,5 +27,10 @@ public record Attribute(String name) implements NamedExpression {
     @Override
     public String sql() {
         return name;
+    }
+
+    @Override
+    public DataType dataType() {
+        return dataType;
     }
 }

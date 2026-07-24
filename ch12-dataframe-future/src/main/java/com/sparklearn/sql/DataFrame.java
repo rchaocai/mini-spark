@@ -21,7 +21,7 @@ public final class DataFrame {
     private final SQLContext sqlContext;
     private final LogicalPlan logicalPlan;
 
-    DataFrame(SQLContext sqlContext, LogicalPlan logicalPlan) {
+    public DataFrame(SQLContext sqlContext, LogicalPlan logicalPlan) {
         this.sqlContext = Objects.requireNonNull(sqlContext, "sqlContext");
         this.logicalPlan = Objects.requireNonNull(logicalPlan, "logicalPlan");
     }

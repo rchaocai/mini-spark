@@ -1,7 +1,12 @@
 package com.sparklearn.sql;
 
 import com.sparklearn.sql.catalyst.expressions.Attribute;
+import com.sparklearn.sql.catalyst.expressions.EqualTo;
+import com.sparklearn.sql.catalyst.expressions.Expression;
+import com.sparklearn.sql.catalyst.expressions.GreaterThan;
+import com.sparklearn.sql.catalyst.expressions.Literal;
 import com.sparklearn.sql.catalyst.plans.logical.Aggregate;
+import com.sparklearn.sql.catalyst.plans.logical.Filter;
 import com.sparklearn.sql.catalyst.plans.logical.LogicalPlan;
 
 import java.util.ArrayList;
@@ -9,7 +14,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 手写最小 SQL 解析器，只支持 SELECT ... FROM ... GROUP BY ... + count(*)。
+ * 手写最小 SQL 解析器，支持 SELECT ... FROM ... [WHERE ...] [GROUP BY ...] + count(*)。
  * <p>
  * Spark 1.3 起用 Scala 的 parser combinator（{@code StandardTokenParsers}）解析 SQL，
  * 核心入口在 {@code SqlParser.scala}。本实现用 Java 手写递归下降，回避外部依赖，
@@ -35,8 +40,16 @@ public final class SqlParser {
      * 支持的语法：
      * <pre>
      * SELECT column [, column] FROM tableName
+     * SELECT column [, column] FROM tableName WHERE condition
      * SELECT column [, count(*)] FROM tableName GROUP BY column
+     * SELECT column [, count(*)] FROM tableName WHERE condition GROUP BY column
      * </pre>
+     *
+     * <p>支持的 WHERE 条件：
+     * <ul>
+     *   <li>column = value（字符串用单引号）</li>
+     *   <li>column > value（数字比较）</li>
+     * </ul>
      */
     public LogicalPlan parse(String sql) {
         List<String> tokens = tokenize(sql);
@@ -54,13 +67,12 @@ public final class SqlParser {
                 i++;
                 continue;
             }
-            if (c == ',' || c == '(' || c == ')' || c == '*') {
+            if (c == ',' || c == '(' || c == ')' || c == '*' || c == '=' || c == '>') {
                 tokens.add(String.valueOf(c));
                 i++;
                 continue;
             }
             if (c == '\'' || c == '"') {
-                // 字符串字面量
                 char quote = c;
                 int j = i + 1;
                 while (j < sql.length() && sql.charAt(j) != quote) {
@@ -70,7 +82,6 @@ public final class SqlParser {
                 i = j + 1;
                 continue;
             }
-            // 标识符或关键字
             int j = i;
             while (j < sql.length() && !isDelimiter(sql.charAt(j))) {
                 j++;
@@ -82,7 +93,7 @@ public final class SqlParser {
     }
 
     private boolean isDelimiter(char c) {
-        return Character.isWhitespace(c) || c == ',' || c == '(' || c == ')' || c == '*';
+        return Character.isWhitespace(c) || c == ',' || c == '(' || c == ')' || c == '*' || c == '=' || c == '>';
     }
 
     // ---- recursive descent parser ----
@@ -99,7 +110,7 @@ public final class SqlParser {
         while (pos < tokens.size() && !isKeyword(tokens.get(pos), "FROM")) {
             String token = tokens.get(pos);
             if (isKeyword(token, "COUNT")) {
-                pos++; // skip COUNT
+                pos++;
                 expect(tokens, "(");
                 expect(tokens, "*");
                 expect(tokens, ")");
@@ -109,17 +120,24 @@ public final class SqlParser {
                 pos++;
             }
             if (pos < tokens.size() && tokens.get(pos).equals(",")) {
-                pos++; // skip comma
+                pos++;
             }
         }
 
         expect(tokens, "FROM");
         String tableName = tokens.get(pos++);
 
+        // 解析 WHERE 条件
+        Expression whereCondition = null;
+        if (pos < tokens.size() && isKeyword(tokens.get(pos), "WHERE")) {
+            pos++;
+            whereCondition = parseCondition(tokens);
+        }
+
         // 解析 GROUP BY
         List<String> groupByCols = new ArrayList<>();
         if (pos < tokens.size() && isKeyword(tokens.get(pos), "GROUP")) {
-            pos++; // skip GROUP
+            pos++;
             expect(tokens, "BY");
             while (pos < tokens.size()) {
                 groupByCols.add(tokens.get(pos++));
@@ -129,32 +147,71 @@ public final class SqlParser {
             }
         }
 
-        // 解析 WHERE（暂不支持，但识别语法）
-        if (pos < tokens.size() && isKeyword(tokens.get(pos), "WHERE")) {
-            throw new UnsupportedOperationException("WHERE clause is not supported yet");
+        return buildPlan(tableName, selectCols, hasCountStar, groupByCols, whereCondition);
+    }
+
+    /**
+     * 解析简单条件表达式。
+     * <p>
+     * 支持的条件：
+     * <ul>
+     *   <li>column = value（支持字符串和数字）</li>
+     *   <li>column > value（支持数字比较）</li>
+     * </ul>
+     */
+    private Expression parseCondition(List<String> tokens) {
+        String left = tokens.get(pos++);
+        String op = tokens.get(pos++);
+
+        String right = tokens.get(pos++);
+        Object value;
+        if (right.startsWith("'") && right.endsWith("'")) {
+            value = right.substring(1, right.length() - 1);
+        } else {
+            try {
+                value = Integer.parseInt(right);
+            } catch (NumberFormatException e) {
+                try {
+                    value = Double.parseDouble(right);
+                } catch (NumberFormatException e2) {
+                    value = right;
+                }
+            }
         }
 
-        // 构建 LogicalPlan
-        return buildPlan(tableName, selectCols, hasCountStar, groupByCols);
+        Attribute leftAttr = new Attribute(left);
+        Literal rightLiteral = new Literal(value);
+
+        return switch (op) {
+            case "=" -> new EqualTo(leftAttr, rightLiteral);
+            case ">" -> new GreaterThan(leftAttr, rightLiteral);
+            default -> throw new UnsupportedOperationException("unsupported operator: " + op);
+        };
     }
 
     private LogicalPlan buildPlan(String tableName, List<String> selectCols,
-                                   boolean hasCountStar, List<String> groupByCols) {
+                                   boolean hasCountStar, List<String> groupByCols,
+                                   Expression whereCondition) {
         LogicalPlan tablePlan = tableRegistry.get(tableName);
         if (tablePlan == null) {
             throw new IllegalArgumentException("table not found: " + tableName);
         }
 
+        LogicalPlan plan = tablePlan;
+
+        if (whereCondition != null) {
+            plan = new Filter(whereCondition, plan);
+        }
+
         if (!groupByCols.isEmpty() && hasCountStar) {
-            // SELECT col, count(*) FROM table GROUP BY col
             List<Attribute> groupingAttrs = new ArrayList<>();
             for (String col : groupByCols) {
                 groupingAttrs.add(new Attribute(col));
             }
-            return new Aggregate(groupingAttrs, tablePlan);
+            return new Aggregate(groupingAttrs, plan);
         }
 
-        return tablePlan;
+        return plan;
     }
 
     // ---- helpers ----

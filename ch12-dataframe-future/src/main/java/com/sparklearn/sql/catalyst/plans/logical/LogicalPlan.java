@@ -9,8 +9,7 @@ import java.util.List;
 /**
  * 逻辑计划：DataFrame 在 action 之前保存的那棵树。
  */
-public sealed interface LogicalPlan extends Serializable
-        permits Aggregate, Filter, Project, Scan {
+public interface LogicalPlan extends Serializable {
 
     List<LogicalPlan> children();
 

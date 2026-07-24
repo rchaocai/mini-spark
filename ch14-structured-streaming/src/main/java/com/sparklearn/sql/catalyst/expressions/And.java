@@ -1,5 +1,6 @@
 package com.sparklearn.sql.catalyst.expressions;
 
+import com.sparklearn.sql.DataType;
 import com.sparklearn.sql.Row;
 
 import java.util.LinkedHashSet;
@@ -26,6 +27,11 @@ public record And(Expression left, Expression right) implements Expression {
     @Override
     public String sql() {
         return "(" + left.sql() + ") AND (" + right.sql() + ")";
+    }
+
+    @Override
+    public DataType dataType() {
+        return DataType.BOOLEAN;
     }
 
     @Override

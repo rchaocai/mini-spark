@@ -31,7 +31,7 @@ public record Project(List<NamedExpression> projectList, LogicalPlan child) impl
     @Override
     public Schema schema() {
         return new Schema(projectList.stream()
-                .map(expression -> new Field(expression.name(), DataType.OBJECT))
+                .map(expression -> new Field(expression.name(), expression.dataType()))
                 .toList());
     }
 
