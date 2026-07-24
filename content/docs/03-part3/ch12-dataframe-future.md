@@ -541,9 +541,19 @@ salary
 
 ## 12.4 DataFrame：不是数据，而是计划
 
-现在可以看 `DataFrame` 了。
+上一节看到，`col("salary").gt(50_000)` 会生成表达式树。接下来的问题是：这些表达式树放在哪里？
 
-它的核心字段只有两个：
+答案是放进 `DataFrame` 保存的逻辑计划里。
+
+创建员工表时，`SQLContext.createDataFrame()` 返回的 `employees` 不是一份已经算好的结果，而是一个从 `employees` 这张表开始的计划：
+
+```text
+Scan(employees)
+```
+
+在这个对象上继续调用 `where()`、`select()`，并不会立刻处理数据，而是把新的计划节点包在旧计划外面。
+
+对应的代码很短：
 
 ```java
 public final class DataFrame {
@@ -565,34 +575,34 @@ public final class DataFrame {
 }
 ```
 
-`DataFrame` 自己不负责切分区，也不负责调度任务。它只保存：
+可以看到，`DataFrame` 自己不负责切分区，也不负责调度任务。它只保存两个东西：
 
 ```text
 SQLContext    查询执行入口
 LogicalPlan   到目前为止攒出来的逻辑计划树
 ```
 
-这就是本章最重要的一句话：
-
-```text
-DataFrame = 带 schema 的惰性逻辑计划
-```
-
-调用 `where()` 时，没有任何数据被过滤。它只是把原来的计划包进一个新的 `Filter`：
+调用 `where()` 时，传进来的条件表达式会变成一个 `Filter` 节点，包在原来的计划外面：
 
 ```text
 Filter(condition)
   └── 原来的计划
 ```
 
-调用 `select()` 时，也没有任何新列被计算。它只是再包一层 `Project`：
+调用 `select()` 时，传进来的输出表达式会变成一个 `Project` 节点，再包一层：
 
 ```text
 Project(expressions)
   └── 原来的计划
 ```
 
-所以这一串代码：
+所以，DataFrame 可以这样理解：
+
+```text
+DataFrame 保存的不是查询结果，而是“以后要怎样得到结果”的计划。
+```
+
+例如这一串调用：
 
 ```java
 employees
@@ -600,7 +610,7 @@ employees
         .select(col("name"), col("salary").multiply(1.25).as("adjusted_salary"));
 ```
 
-只是把计划从：
+会把计划从：
 
 ```text
 Scan(employees)
@@ -614,17 +624,17 @@ Project(name, salary * 1.25 AS adjusted_salary)
       └── Scan(employees)
 ```
 
-中间没有读一行数据。
+中间没有读一行员工数据，也没有计算 `adjusted_salary`。
 
-真正触发执行的是 action：
+真正需要结果时，才在 `DataFrame` 上调用 action。本章实现了这几个：
 
 ```java
-collect()
-show()
-count()
+adjustedSalary.collect();  // 返回 List<Row>
+adjustedSalary.show();     // 收集结果并打印每一行
+adjustedSalary.count();    // 返回行数
 ```
 
-action 触发后，会进入 `QueryExecution`：
+这些是 DataFrame 层的 action。它们触发查询进入 `QueryExecution`，生成物理计划后，内部再调用 RDD 的 action：
 
 ```mermaid
 flowchart LR
@@ -635,14 +645,14 @@ flowchart LR
     Execute --> RDD["RDD action"]
 ```
 
-这和 RDD 的惰性很像，但攒下来的东西不一样：
+这和 RDD 的惰性很像，但保存下来的内容不一样：
 
 ```text
 RDD 惰性：攒 RDD 血缘。
 DataFrame 惰性：攒逻辑计划树。
 ```
 
-RDD 的血缘主要告诉系统“这个分区怎么算出来”。DataFrame 的逻辑计划还多告诉系统“这个查询在关系层面想要什么”。
+RDD 的血缘主要告诉系统“这个分区怎么算出来”。DataFrame 的逻辑计划还会告诉系统“这次查询用到了哪些列、哪些条件、哪些表级操作”。
 
 ## 12.5 逻辑计划：把整张表的变化串成树
 
@@ -702,10 +712,10 @@ Project(name, salary * 1.25 AS adjusted_salary)
       └── Scan(employees, columns=[id, name, department, salary])
 ```
 
-树是从外面一层层包起来的。读计划时，却通常从下往上读，因为数据流动方向是从叶子到根：
+树是从外面一层层包起来的。读计划时，可以按数据流动方向看：先扫描，再过滤，最后投影。
 
 ```mermaid
-flowchart BT
+flowchart LR
     Scan["Scan employees"] --> Filter["Filter salary > 50000"]
     Filter --> Project["Project name, adjusted_salary"]
 ```
@@ -734,7 +744,17 @@ Project(name, salary * 1.25 AS adjusted_salary)
 
 查询优化器做的就是这种事。
 
-Spark SQL 把自己的查询优化器叫 **Catalyst**。这个名字背后包含很多工程内容：表达式、逻辑计划、规则、Analyzer、优化器、物理规划、代码生成。我们这一章不实现完整 Spark Catalyst，只实现它最核心、也最适合入门的一小块：
+> [!INFO]
+> **Catalyst 工程内容**
+>
+> Spark SQL 把自己的查询优化器叫 **Catalyst**。这个名字背后包含很多工程内容：表达式、逻辑计划、规则、Analyzer、优化器、物理规划、代码生成。
+>
+> 本章实现了其中四个核心部分：**表达式**（Expression 体系）、**逻辑计划**（LogicalPlan 树节点）、**规则**（Rule 接口，以及 CombineFilters / PushFilterIntoScan / PruneScanColumns 三条具体规则）、**RuleExecutor**（批量迭代应用规则直到计划不再变化）。未实现的部分及原因：
+>
+> - **Analyzer**：负责解析表名、列名、函数引用，将它们绑定到 Catalog 中的元数据，并校验类型是否合法。本章直接用手工构造逻辑计划的方式跳过了解析步骤——不写 SQL 解析器，也能理解计划树的结构。
+> - **完整的优化器**：Spark 内置了大量优化规则（常量折叠、空值传播、Join 重排序等）。本章只实现了最核心的三条规则（谓词下推、列裁剪、Filter 合并），足以展示规则驱动的优化思想，读者掌握后可以自行添加更多规则。
+> - **物理规划**：将优化后的逻辑计划转换成可执行的物理计划，比如选择 Join 算法（HashJoin / BroadcastJoin）、聚合策略等。本章查询规模小，逻辑计划直接就可以执行，物理规划暂时不需要。
+> - **代码生成**：将表达式计算编译成 Java 字节码，消除虚函数调用开销以提升性能。这是 Spark 生产环境的性能优化手段，对理解优化器原理没有帮助，本书不涉及。
 
 在本章里，Catalyst 做的事很朴素：
 
@@ -748,7 +768,7 @@ Spark SQL 把自己的查询优化器叫 **Catalyst**。这个名字背后包含
 
 ### 12.6.1 谓词下推：先少拿行
 
-原始计划里，过滤条件在 `Scan` 上面：
+原始计划里，过滤条件在 `Filter` 上，即数据显从数据源全部取出来，在我们的服务中进行过滤：
 
 ```text
 Filter(salary > 50000)
