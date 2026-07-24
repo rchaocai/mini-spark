@@ -273,7 +273,7 @@ public Optional<RDD<U>> compute(Time validTime) {
 }
 ```
 
-`DStream.map` 只是 `new` 一个 `MappedDStream` 挂上去——和 `rdd.map` 一样惰性，不算数据。真正干活的是 `MappedDStream.compute`。这一行从左往右读，先 `parent.getOrCompute(validTime)`——`parent` 是父流，也就是这条流的上一节点。在 WordCount 里，`map` 这步的父流就是 `flatMap` 那步；`getOrCompute(validTime)` 在 `validTime` 这个时间点向父流要一个 RDD，`validTime` 是 `Time(1000)` 时，就拿回 `flatMap` 在 `Time(1000)` 算出来的那个 RDD（一串拆好的词）。
+`DStream.map` 只是 `new` 一个 `MappedDStream` 挂上去——和 `rdd.map` 一样惰性，不算数据。真正干活的是 `MappedDStream.compute`。拆开看：先 `parent.getOrCompute(validTime)`——`parent` 是父流，也就是这条流的上一节点。在 WordCount 里，`map` 这步的父流就是 `flatMap` 那步；`getOrCompute(validTime)` 在 `validTime` 这个时间点向父流要一个 RDD，`validTime` 是 `Time(1000)` 时，就拿回 `flatMap` 在 `Time(1000)` 算出来的那个 RDD（一串拆好的词）。
 
 拿到这个父 RDD，再对它调 `rdd.map(mapFunc)`，把每个词变成 `(词, 1)`——这一下，和第 1 章对 RDD 调的 `map` 是同一个。
 
@@ -476,7 +476,7 @@ private void readLoop() {
 }
 ```
 
-中间这行 `deserializer.read(...)` 是一条可以替换的缝：socket 来的是字节，字节怎么变成一条条对象，由一个 `Deserializer` 决定。`socketTextStream` 接的 `bytesToLines` 就是其中一种——按 UTF-8 把字节切成一行行字符串，读一行、发一行；换成按别的格式切，receiver 这套读取和缓冲照样能用。
+中间这行 `deserializer.read(...)` 是可插拔的扩展点：socket 来的是字节，字节怎么变成一条条对象，由一个 `Deserializer` 决定（`Deserializer` 是一个可替换的接口，负责把字节流切分成对象）。`socketTextStream` 接的 `bytesToLines` 就是其中一种——按 UTF-8 把字节切成一行行字符串，读一行、发一行；换成按别的格式切，receiver 这套读取和缓冲照样能用。
 
 `onStart` / `onStop` 是 `Receiver` 上的钩子，`SocketInputDStream.start` 调 `receiver.start()` 时触发。这个读取线程的节奏完全由 socket 那头决定——对方发得快它就读得快，发了才读，**和 batch 的时间节拍互不相干**。`compute` 则按 batch 节拍被调度器调，每次把缓冲排空一次。receiver 只管往里攒，DStream 按点往外清，两边各走各的节奏，缓冲就是它们碰头的地方：
 
@@ -488,11 +488,14 @@ flowchart LR
     RDD --> J["这个 batch 的 job"]
 ```
 
-顺带说一处和真实 Spark 的差别：Spark 的 receiver 读到对象后，交给 `BlockGenerator` 攒成一块块、存进 `BlockManager`，`compute` 再按 batch 把这些块拼成一个 `BlockRDD`——块是存储和并行度的单位，还能复制来容错。这里没有 `BlockManager`，receiver 直接攒进自己的缓冲、`compute` 直接排空，省掉了切块和存储那一层；但"后台攒、按 batch 取"这两个角色是一致的。
+> [!INFO]
+> **真实 Spark 中怎么做的？**
+> 
+> Apache Spark 的 receiver 读到对象后，交给 `BlockGenerator` 生成一个个 `Block` 存进 `BlockManager`，`compute` 再按 batch 把这些块拼成一个 `BlockRDD`——`Block` 是存储和并行度的单位，还能复制来容错。本书为了专注于思想的核心设计，避免读者陷入代码中，没有使用 `BlockManager`，receiver 直接攒进自己的缓冲、`compute` 直接排空，略去了分块和存储那一层；但"后台收集、按 batch 取"这核心逻辑和设计是一致的。
 
-这么一摆，"按时间点取数据"就落到了实处：每个 batch 的 RDD，装的就是**从上一次排空到这一次之间、新到达的那些行**。这一段时间里没来数据，`drainTo` 倒出来是空的，`compute` 返回 `empty`，这个 batch 就不产生 job。
+这么一来，"按时间点取数据"的机制就清晰了：每个 batch 的 RDD，装的就是**从上一次排空到这一次之间、新到达的那些行**。如果这一段时间里没来数据，缓冲里就是空的，`drainTo` 自然取不到任何元素，`compute` 返回 `empty`，这个 batch 就不产生 job。
 
-**跑一遍，看数据怎么落进各自的 batch。** 演示用 `LineServer`——一个只给演示用的本地 TCP 桩，按指定的节奏往 socket 写行。主程序把它和 socket 流接上，再手动推三个 batch：第一个 batch 之前写两行，第二个之前一行也不写，第三个之前再写一行：
+下面的演示用一个叫 `LineServer` 的本地 TCP 服务来模拟数据源：它监听一个端口，被调用时才往 socket 写入指定的行。主程序把 `LineServer` 接到 socket 流上，然后手动推进三个 batch。推进的节奏是这样安排的：在第一个 batch 之前写两行，第二个 batch 之前什么也不写，第三个 batch 之前再写一行。
 
 ```java
 LineServer server = new LineServer();        // 监听一个本地端口
@@ -528,7 +531,7 @@ date -> 1
 
 batch1 那一阵写进了 "apple banana"、"banana cherry" 两行，它的 RDD 里就是这几个词；batch2 那一阵什么也没写，缓冲是空的，`compute` 返回 `empty`，于是 `jobs=0`——这一批压根没提交 job；batch3 之前写了 "cherry date"，落进 batch3。
 
-这里和队列流有个对照值得看清：队列空了，`QueueInputDStream` 给的是**兜底的空 RDD**，job 照样跑（在空数据上跑一遍）；socket 这阵没数据，`SocketInputDStream` 干脆返回 `empty`，job 都不提交。同样是"这一批没数据"，两种数据源选了不同处理——队列流把"空"当成一种确定的数据交给下游，socket 流把"空"当成"没活干"。差别不在 DStream 框架，而在各自的数据源怎么定义"这一批有什么"。
+同样是"这一批没数据"，`QueueInputDStream` 和`SocketInputDStream` 两种数据源选了不同处理方式——`QueueInputDStream` 把"空"当成一种确定的数据交给下游，job 照样跑（在空数据上跑一遍），`SocketInputDStream` 直接返回 `empty`，job 都不提交。差别不在 DStream 框架，而在各自的数据源怎么定义"这一批有什么"。
 
 ### 11.5.4 StreamingContext：那层时间驱动器
 
@@ -559,7 +562,7 @@ public int advance() {
 }
 ```
 
-这四步串起来，就是 11.2 那个"时间驱动器"的全部：推时间 → 收 job → 跑 job → 清旧账。一次 `advance()` 就是一个 batch 的完整生命周期。
+这四步串起来，就是 11.2 那个"时间驱动器"的全部：推时间 → 生成 job → 跑 job → 清旧账。一次 `advance()` 就是一个 batch 的完整生命周期。
 
 ```mermaid
 sequenceDiagram
