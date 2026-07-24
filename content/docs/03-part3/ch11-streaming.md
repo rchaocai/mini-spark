@@ -435,11 +435,11 @@ public Optional<RDD<T>> compute(Time validTime) {
 }
 ```
 
-三条分支，没一条读 `validTime`。这个参数还在签名里，是因为所有 DStream 的 `compute` 都长一个样 `compute(Time)`，调度器才能一刀切地喊"各把 Time(1000) 的 RDD 交出来"。转换流（`MappedDStream` 那一类）拿 `Time` 去问父流要"这个时间点"的 RDD，`Time` 在它那里有用；输入流没有父流可问，数据全看自己包的是哪种数据源，`Time` 就用不上，收到忽略。
+三条分支，没一条用到 `validTime` 参数，这是因为所有 DStream 的 `compute` 都长一个样 `compute(Time)`，调度器才能一刀切地喊"各把 Time(1000) 的 RDD 交出来"。转换流（例如 `MappedDStream`）拿 `Time` 去问父流要"这个时间点"的 RDD，`Time` 在它那里有用；输入流没有父流可问，数据全看自己包的是哪种数据源，`Time` 不一定能用上。
 
-那"按时间点取数据"到底存不存在？存在——但不在队列这种**预先塞好**的数据源里，而在**真实从外面进来**的数据源里：数据按它到达的时刻，被分到不同的 batch。下面这第二个输入流 `SocketInputDStream` 就是这种。
+`QueueInputDStream` 只是为了演示方便构建的，在真实的场景里头数据会实时进来，按它到达的时刻被分到不同的 batch。下面的输入流 `SocketInputDStream` 就是属于这种类型（实际业务中更多是从 `Kafka` 等消息队列实时消费数据）。
 
-**从 socket 读行的输入流。** `SocketInputDStream` 连到一个 `host:port`，把对方一行行发来的文本接成一条流。它的数据不是预先备好的，而是**实时到达**的。这里有两件事：一件是"按 batch 把到达的数据包成 RDD"——输入流的活；一件是"连上 socket、把字节一行行读进来"——真正去拿数据的活。这两件事分给两个对象：`SocketInputDStream` 只管前者，后者交给一个 `SocketReceiver`。
+**从 socket 读取数据的输入流。** `SocketInputDStream` 连到一个 `host:port`，把对方一行行发来的文本接成一条流。数据是实时到达的，不是预先备好的。整个实现被拆成了两层：上层负责"按批次把到达的数据打包成 RDD"，这是 `SocketInputDStream` 自己的事；下层负责"连上 socket、把字节一行行读进来"，这是真正从线路上取数据的脏活累活，交给了 `SocketReceiver`。
 
 `SocketInputDStream` 自己不碰 socket，它持有一个 receiver，`start` / `compute` / `stop` 都转给它：
 
@@ -459,7 +459,7 @@ public void stop()  { receiver.stop(); }
 
 `compute` 同样不读 `validTime`，但不读的原因和队列流不同：队列流是"按进队顺序取一个"，socket 流是"取这一阵子到达的全部"。`receiver.drainTo` 把 receiver 里**到目前为止攒下的对象**一次性倒出来——攒了什么、攒了多少，取决于上一次排空之后又来了什么。
 
-攒数据的活在 `SocketReceiver` 这一边。它连上 socket，起一个后台线程堵着读，每读到一个对象就 `push` 进自己的缓冲：
+收集数据的工作由 `SocketReceiver` 负责。它连上 socket 后会起一个后台线程读取数据，每读到一个对象就 `push` 进自己的缓冲：
 
 ```java
 protected void onStart() throws Exception {
