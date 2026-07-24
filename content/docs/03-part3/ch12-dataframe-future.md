@@ -250,6 +250,69 @@ ResultStage 0 (rdd=MapPartitionsRDD, parents=[])
 
 这个查询没有 shuffle，所以只有一个 `ResultStage`。你在第 7 章写过的 Stage 划分逻辑，没有变。
 
+### 12.2.1 同一棵树，两种写法：SQL 字符串
+
+上面用的是 DataFrame API——`where().select()`。但既然 DataFrame 的表里存的是一棵逻辑计划树，那 SQL 字符串当然也能解析成同一棵树：
+
+```java
+sql.registerTable("employees", employees.logicalPlan());
+DataFrame result = sql.sql(
+    "SELECT department, count(*) FROM employees GROUP BY department");
+```
+
+生成的逻辑计划：
+
+```text
+== Logical Plan ==
+Aggregate(groupBy=[department], count(*))
+  └── Scan(employees, columns=[id, name, department, salary])
+```
+
+和 DataFrame API 的 `groupBy("department").count()` 是同一棵树，走完全一样的优化和物理计划链路。
+
+> [!INFO]
+> **Spark 版本和分支**
+>
+> SQL / DataFrame 支持从 **Spark 1.3**（`branch-1.3`）开始引入，最早的 SQL 解析器在
+> `sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/SqlParser.scala`，
+> 用 Scala 的 `StandardTokenParsers`（parser combinator）解析 SQL 字符串转成 LogicalPlan。
+> 本章的 `SqlParser` 参考了它的骨架，但用 Java 手写递归下降，只覆盖 `SELECT ... FROM ... GROUP BY ... + count(*)` 这个教学子集。
+
+`SqlParser` 的核心流程只有三步：
+
+```text
+"SELECT department, count(*) FROM employees GROUP BY department"
+  → tokenize: 按空格、逗号、括号切 token
+  → 递归下降解析: SELECT子句 → FROM子句 → GROUP BY子句
+  → 构建 LogicalPlan: Aggregate([department], Scan(employees))
+```
+
+`SQLContext` 新增了两个方法：
+
+```java
+// 注册表，供 SQL 查询引用
+public void registerTable(String tableName, LogicalPlan plan) {
+    tableRegistry.put(tableName, plan);
+}
+
+// 执行 SQL 查询，返回 DataFrame
+public DataFrame sql(String sqlText) {
+    LogicalPlan plan = sqlParser.parse(sqlText);
+    return new DataFrame(this, plan);
+}
+```
+
+这和 Spark 1.3 的 `SQLContext.sql()` 是同一个模式：
+
+```scala
+// Spark 1.3 源码
+def sql(sqlText: String): DataFrame = DataFrame(this, parseSql(sqlText))
+```
+
+`registerTable("employees", ...)` 把 `Scan` 放入表注册表，`sql("SELECT ... FROM employees ...")` 从注册表里找到 `Scan`，构建出和 DataFrame API 完全相同的逻辑计划树。
+
+这就证明了一件事：**DataFrame API 和 SQL 是同一棵树的两张面具。** 无论你用哪种语法写查询，引擎做的事都一样。
+
 ## 12.3 DataFrame 到底是什么
 
 `DataFrame` 类很短：
@@ -755,6 +818,13 @@ RDD 时代的 Spark `branch-0.5` 还没有 SQL。要看 Spark SQL，需要切到
 > sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/Optimizer.scala
 > sql/core/src/main/scala/org/apache/spark/sql/execution/SparkStrategies.scala
 > sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala
+> ```
+>
+> SQL 解析器也在这个分支：
+>
+> ```text
+> sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/AbstractSparkSQLParser.scala
+> sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/SqlParser.scala
 > ```
 >
 > 这里只留入口，不做逐类对照。逐项源码对照放到最后一章；这里更关心结构化查询链路本身。

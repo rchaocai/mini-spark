@@ -23,7 +23,7 @@ public final class Main {
             SQLContext sql = new SQLContext(spark);
             DataFrame employees = sql.createDataFrame("employees", employees(), 2);
 
-            System.out.println("\n需求一：查出薪水 > 50000 的员工姓名和调整后薪水。\n");
+            System.out.println("\n--- 需求一：查出薪水 > 50000 的员工姓名和调整后薪水 ---\n");
 
             DataFrame adjustedSalary = employees
                     .where(col("salary").gt(50_000))
@@ -47,7 +47,29 @@ public final class Main {
             System.out.println(departmentCounts.explainString());
             System.out.println("结果：");
             departmentCounts.show();
+
+            // ---- SQL 演示 ----
+            System.out.println("\n" + "=".repeat(72));
+            System.out.println("SQL 演示：用 SQL 字符串做同样的查询");
+            System.out.println("=".repeat(72));
+
+            demoSQL(sql);
         }
+    }
+
+    private static void demoSQL(SQLContext sql) {
+        // 注册表，让 SQL 能引用
+        DataFrame employees = sql.createDataFrame("employees", employees(), 2);
+        sql.registerTable("employees", employees.logicalPlan());
+
+        System.out.println("\nSQL 查询：SELECT department, count(*) FROM employees GROUP BY department\n");
+
+        DataFrame result = sql.sql("SELECT department, count(*) FROM employees GROUP BY department");
+        System.out.println(result.explainString());
+        System.out.println("结果：");
+        result.show();
+
+        System.out.println("\nSQL 和 DataFrame API 生成的逻辑计划一模一样。");
     }
 
     private static List<Row> employees() {
