@@ -121,7 +121,7 @@ rdd.filter(row -> ((Number) row.get("salary")).doubleValue() > 50_000)
 
 第一个函数里写了 `row.get("salary")`，人能读懂这是在过滤薪水；第二个函数里写了 `row.get("name")` 和 `row.get("salary")`，人也能读懂最后只需要两列。
 
-但 RDD 执行层不会像读者一样“读懂”这段 Java 代码。它只知道：
+但 RDD 执行层不会理解这段 Java 代码的意图。它只知道：
 
 ```text
 filter 里有一个匿名函数：给它一行 Row，它返回 true 或 false
@@ -186,14 +186,14 @@ department 在这个查询里没用
 id 在这个查询里也没用
 ```
 
-有了这些信息，优化才有了抓手。
-
-先别急着记名词。只要抓住这一点：
+这些信息会直接改变执行方式：
 
 ```text
-RDD 把用户逻辑交给系统执行。
-DataFrame 先把用户逻辑交给系统理解，再执行。
+RDD 写法：系统只能按顺序调用 filter 和 map。
+DataFrame 写法：系统能先检查表达式树，再决定只读哪些列、先过滤哪些行。
 ```
+
+这就是 DataFrame 和 RDD 在这一节里的核心差别。DataFrame 不是让计算立刻发生，而是先把查询保存成系统能分析的结构。
 
 ## 12.2 先跑一遍：看三棵树
 
@@ -214,21 +214,25 @@ DataFrame adjustedSalary = employees
                 col("salary").multiply(1.25).as("adjusted_salary"));
 ```
 
-这段代码看起来像是在过滤和选择列，但这里有一个关键点：
+这几行执行完以后，`adjustedSalary` 还不是“已经算好的员工结果”。
+
+它只是一个新的 `DataFrame` 对象。这个对象里面记着：
 
 ```text
-where() 不过滤数据。
-select() 不计算新列。
-它们只是返回一个新的 DataFrame。
+先从 employees 读数据
+再过滤 salary > 50000
+最后输出 name 和 salary * 1.25
 ```
 
-示例程序先调用：
+也就是说，`where()` 和 `select()` 只是把查询步骤记下来，还没有开始逐行扫描员工数据。
+
+为了确认系统到底记下了什么，示例程序先调用：
 
 ```java
 System.out.println(adjustedSalary.explainString());
 ```
 
-所以你会先看到三棵树。
+`explainString()` 不触发真正计算，它只把这次查询从“描述”到“执行”的三种形态打印出来。所以你会先看到三棵树。
 
 第一棵是原始逻辑计划：
 
@@ -298,21 +302,23 @@ ResultStage 0 (rdd=MapPartitionsRDD, parents=[])
 {name=Frank, adjusted_salary=83750.0}
 ```
 
-先记住这个顺序：
+把刚才看到的三棵树和最后的 RDD 执行放在一起，就是这一章的主线：
 
-```text
-写 DataFrame API
-  -> 得到逻辑计划
-  -> 优化逻辑计划
-  -> 生成物理计划
-  -> 落回 RDD 执行
+```mermaid
+flowchart LR
+    API["写 SQL / DataFrame API"] --> Logical["得到逻辑计划"]
+    Logical --> Optimized["优化逻辑计划"]
+    Optimized --> Physical["生成物理计划"]
+    Physical --> RDD["落回 RDD 执行"]
 ```
 
-后面所有代码，只是在把这条链路拆开看。
+接下来先看第一步：SQL 和 DataFrame 为什么都能把一次查询保存成系统可以分析的结构。
 
 ## 12.3 三个小零件：Row、Schema、Expression
 
 DataFrame 比 RDD 多出来的第一件事，是“结构”。
+
+这一节先从 DataFrame API 看，因为它能直接在 Java 代码里造出这些结构。SQL 字符串会多经过一步解析器；它怎样变成同一套结构，放到 12.8 再说明。
 
 RDD 里的元素可以是任何对象。你可以放字符串、整数、业务对象，也可以放一行表格。RDD 本身不关心里面有什么。
 
@@ -328,7 +334,35 @@ DataFrame 不一样。它必须知道：
 
 ### 12.3.1 Row：一行值
 
-`Row` 表示一行数据：
+先想一个问题：一行员工数据，在 Java 里可以怎么表示？
+
+最自然的是写一个业务类：
+
+```java
+record Employee(int id, String name, String department, int salary) {
+}
+```
+
+这样写类型很清楚，但对查询系统不友好。优化器拿到的是一个 `Employee` 对象，它还是不知道后面的表达式会读哪些字段。更重要的是，DataFrame 要处理的不只是一张员工表。今天是 `employees`，明天可能是订单表、日志表、商品表。系统不能为每张表都写一个专门的 Java 类。
+
+另一种直觉写法是用 `Map`：
+
+```java
+Map.of("id", 1, "name", "Alice", "department", "eng", "salary", 72_000)
+```
+
+这很灵活，按列名取值也直观。但如果每一行都带一份字段名，数据一多就很浪费：同样的 `"id"`、`"name"`、`"department"`、`"salary"` 会在每一行里重复出现。
+
+所以 DataFrame 通常会把“一行值”和“列说明”拆开：
+
+```text
+Row     只保存这一行的值
+Schema  统一说明这些值对应哪些列
+```
+
+这样，同一张表的很多行可以共用一份 Schema，每一行只保存自己的值。
+
+本章的 `Row` 表示一行数据。为了保留按列名阅读一行数据的直觉，构造时允许用字段名和值交替传入：
 
 ```java
 Row.of("id", 1,
@@ -337,13 +371,13 @@ Row.of("id", 1,
         "salary", 72_000)
 ```
 
-为了让示例代码容易读，本章的 `Row` 支持按字段名取值：
+也支持按字段名取值：
 
 ```java
 row.get("salary")
 ```
 
-但它内部仍然用 `Object[]` 保存值。字段名只是映射到数组下标：
+不过，字段名不是每次计算时真正遍历的数据主体。`Row` 内部保存值的地方是一个数组，字段名只用来找到数组下标：
 
 ```text
 nameToIndex:
@@ -356,7 +390,30 @@ values:
 [1, Alice, eng, 72000]
 ```
 
-真实 Spark SQL 里，内部行格式会更复杂，也更紧凑。这里不用追那些细节。现在只要知道：一行数据最终还是一组值，只是 DataFrame 还要知道这些值分别对应哪些列。
+所以这里出现 `Object[]`，不是说业务代码应该直接操作数组，也不是说表格数据就应该失去类型。它表达的是一个底层设计取舍：
+
+```text
+对用户：可以按列名理解这一行。
+对执行层：最好按位置快速访问这一行的值。
+```
+
+这一节先只保留这个模型：一行数据最终是一组按位置排列的值，而列名和类型由 Schema 统一说明。
+
+> [!INFO]
+> **Spark 里的 Row 和内部行格式**
+>
+> Spark 面向用户暴露的是 `Row`。用户可以把它理解成“一行表格数据”，通过列的位置或列名读取值。
+>
+> 但 Spark SQL 执行时不会一直用这种面向用户的对象表示。执行层更关心速度和内存占用，所以内部还有更底层的行格式，例如 `InternalRow`。现代 Spark 里常见的 `UnsafeRow` 会把一行数据放进紧凑的二进制内存布局里，减少 Java 对象数量，也方便按位置快速读取字段。
+>
+> 所以真实 Spark 大致分成两层：
+>
+> ```text
+> 用户看到：Row，强调好理解、好访问
+> 执行内部：InternalRow / UnsafeRow，强调紧凑和按位置访问
+> ```
+>
+> 本章的 `Row` 没有实现这套二进制格式，只保留关键方向：用户可以按列名理解数据，执行时则尽量把字段名转换成位置访问。
 
 ### 12.3.2 Schema：列的说明书
 
@@ -387,14 +444,17 @@ public DataFrame createDataFrame(String relationName, List<Row> rows, int number
 }
 ```
 
-这里的推断很简化，只够教学使用。真实系统会有更完整的类型检查、空值处理和数据源 schema 读取。
-
 但概念已经够了：
 
 ```text
 Row    是一行值
 Schema 说明这一行值有哪些列
 ```
+
+> [!INFO]
+> **Schema 推断的边界**
+>
+> 这里的 `Schema.inferFrom(rows.get(0))` 只覆盖当前例子需要的基本类型。完整的数据系统还会处理更多情况，比如类型检查、空值、嵌套类型，以及从 Parquet、JSON、JDBC 等数据源读取已有 schema。
 
 ### 12.3.3 Expression：把一行里的计算写成树
 
@@ -422,33 +482,62 @@ references()   这个表达式用到了哪些列
 sql()          怎么打印成可读文本
 ```
 
-其中最关键的是 `references()`。
+其中最关键的是 `references()`。它不是只看某一个小节点，而是看整棵表达式树里出现过哪些列。
 
-比如：
+先看过滤条件：
 
 ```java
 col("salary").gt(50_000)
 ```
 
-它的引用集合是：
+这行代码会组成这样一棵树：
+
+```text
+GreaterThan
+  Attribute(salary)
+  Literal(50000)
+```
+
+这里有三个节点：
+
+```text
+Attribute(salary)  表示 salary 这一列
+Literal(50000)     表示常量 50000
+GreaterThan        表示左边大于右边
+```
+
+如果问这个 `GreaterThan` 条件“你计算时需要哪些输入列”，它会去问自己的两个子节点，再把结果合并起来：
 
 ```text
 salary
 ```
 
-再比如：
+结果只有 `salary`，因为左边的 `Attribute(salary)` 引用了 salary，右边的 `Literal(50000)` 只是常量，不引用任何列。
+
+再看输出列：
 
 ```java
 col("salary").multiply(1.25).as("adjusted_salary")
 ```
 
-它的引用集合也是：
+它会组成这样一棵树：
+
+```text
+Alias(adjusted_salary)
+  Multiply
+    Attribute(salary)
+    Literal(1.25)
+```
+
+这里的根节点是 `Alias`，表示给计算结果起一个输出列名；中间的 `Multiply` 表示乘法；叶子上的 `Attribute(salary)` 才是真正引用输入列的地方。
+
+所以如果问这个 `Alias` 输出列“你计算时需要哪些输入列”，它一路往下看，结果仍然是：
 
 ```text
 salary
 ```
 
-优化器后来能做列裁剪，靠的正是这个信息。它不是猜出来的，也不是扫描 Java 字节码看出来的，而是因为用户一开始写的就是结构化表达式。
+优化器后来能做列裁剪，靠的就是这种“整棵表达式用了哪些列”的信息。它不是猜出来的，也不是扫描 Java 字节码看出来的，而是表达式对象自己就能回答这个问题。
 
 ## 12.4 DataFrame：不是数据，而是计划
 
@@ -694,7 +783,10 @@ Filter
 
 本章的内存数据源最终还是用 RDD 的 `filter()` 执行。但接口位置已经对了：`Scan` 可以携带 `pushedFilters`。如果以后换成 Parquet、JDBC 或别的数据源，这个位置就可以把过滤条件交给外部系统，让它少读数据。
 
-这里也要说清楚一个教学简化：本章直接把 `Filter` 合进了 `Scan`。真实 Spark 往往更谨慎，可能会把过滤条件下推给数据源，同时仍保留 Spark 侧过滤。因为外部数据源不一定保证已经完整、精确地执行了所有条件。
+> [!INFO]
+> **过滤下推的边界**
+>
+> 本章直接把 `Filter` 合进了 `Scan`，这样计划变化最直观。Spark SQL 通常会更谨慎：它可以把过滤条件下推给数据源，同时仍保留 Spark 侧过滤。原因是外部数据源不一定保证已经完整、精确地执行了所有条件。
 
 ### 12.6.2 列裁剪：再少拿列
 
@@ -744,7 +836,12 @@ Project(name, salary * 1.25 AS adjusted_salary)
 
 例如 `salary > 50000` 需要 `salary`。所以哪怕最后只输出 `name`，扫描时也仍然要保留 `salary`，否则过滤条件没法算。
 
-生产系统里，列裁剪的收益很大。尤其是列式存储里，只读两列和读两百列不是一个量级。本章数据在内存里，性能差异不明显，但计划形状已经和真实系统的方向一致。
+本章数据在内存里，性能差异不明显；但从计划上看，`Scan` 已经能表达“只读这些列”。
+
+> [!INFO]
+> **列裁剪为什么重要**
+>
+> 在列式存储里，列裁剪的收益会非常明显。只读两列和读两百列，意味着磁盘读取、解码、内存占用和网络传输都可能大幅减少。Parquet、ORC 这类格式正是按列组织数据，所以特别适合和列裁剪配合。
 
 ### 12.6.3 RuleExecutor：把规则反复应用到不再变化
 
@@ -964,7 +1061,7 @@ DataFrame result = sql.sql(
         "SELECT department, count(*) FROM employees GROUP BY department");
 ```
 
-本章的 `SqlParser` 很小，只支持教学需要的子集：
+本章的 `SqlParser` 很小，只支持这几种查询形状：
 
 ```text
 SELECT column [, column] FROM tableName
@@ -1018,25 +1115,31 @@ DataFrame API   -> API 调用 -> LogicalPlan
 LogicalPlan 之后，两条路汇合。
 ```
 
-真实 Spark 的 SQL 解析器当然复杂得多。它要处理函数、别名、join、子查询、类型转换、错误提示等大量细节。本章只保留一条窄路，是为了让你看到最重要的结构：
-
 ```text
 不同入口最终汇成同一棵逻辑计划树。
 ```
 
+> [!INFO]
+> **SQL 解析器的边界**
+>
+> 本章的 SQL 解析器只覆盖最小查询形状。完整 SQL 解析器还要处理函数、别名、join、子查询、类型转换、错误提示等大量细节。这里先保留一条窄路，让 SQL 能进入同一套逻辑计划结构。
+
 ## 12.9 这一章没有展开什么
 
-到这里，我们已经跑通了 DataFrame 的主线。但 Spark SQL 真实系统还会多出几个重要阶段。
+到这里，我们已经跑通了 DataFrame 的主线。还有几类能力先不展开。
 
-第一是 Analyzer。SQL 里刚解析出来的列名、表名和函数名，最开始只是名字。Analyzer 会把它们解析到具体表、具体列、具体类型上，并做语义检查。本章为了缩短路径，直接用已注册的表和简单列名，省掉了完整 Analyzer。
+> [!INFO]
+> **还有哪些能力没有展开**
+>
+> 第一是 Analyzer。SQL 里刚解析出来的列名、表名和函数名，最开始只是名字。Analyzer 会把它们解析到具体表、具体列、具体类型上，并做语义检查。本章直接用已注册的表和简单列名，省掉了完整 Analyzer。
+>
+> 第二是更复杂的物理规划。Spark 会根据统计信息、数据大小和算子能力选择不同策略，比如 join 时选择 shuffle join 还是 broadcast join。本章只实现了 `ScanExec`、`ProjectExec`、`HashAggregateExec` 三个节点。
+>
+> 第三是代码生成。Spark 会把表达式生成 JVM 字节码，减少逐个解释表达式的开销。本章直接调用 `expression.eval(row)`。
+>
+> 第四是数据源体系。Spark 要接 Parquet、JSON、JDBC、Hive 等数据源，每种数据源能下推的过滤条件和列裁剪能力都不同。本章用内存 RDD 模拟数据源，只保留接口形状。
 
-第二是更复杂的物理规划。真实 Spark 会根据统计信息、数据大小和算子能力选择不同策略，比如 join 时选择 shuffle join 还是 broadcast join。本章只实现了 `ScanExec`、`ProjectExec`、`HashAggregateExec` 三个节点。
-
-第三是代码生成。真实 Spark 会把表达式生成 JVM 字节码，减少逐个解释表达式的开销。本章直接调用 `expression.eval(row)`，这样更容易看懂。
-
-第四是数据源体系。真实 Spark 要接 Parquet、JSON、JDBC、Hive 等数据源，每种数据源能下推的过滤条件和列裁剪能力都不同。本章用内存 RDD 模拟数据源，只保留接口形状。
-
-这些没有展开，不是因为它们不重要，而是因为初学时最容易丢掉的是主线。先把主线抓牢：
+这些能力都很重要，但主线先保持简单：
 
 ```mermaid
 flowchart LR
@@ -1053,7 +1156,7 @@ flowchart LR
 
 RDD 时代的早期 Spark 还没有今天熟悉的 SQL 层。要看 DataFrame 和 Catalyst，需要看 Spark SQL 引入之后的代码。
 
-如果你想对照真实 Spark，可以先从这些入口看：
+如果想继续看 Spark 源码，可以先从这些入口看：
 
 ```text
 sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
