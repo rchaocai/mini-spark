@@ -1,0 +1,16 @@
+<pre class="mermaid">
+  {{- .Inner | htmlEscape | safeHTML -}}
+</pre>
+{{- if not (.Page.Store.Get "mermaid") -}}
+  {{- /* Include mermaid only first time; v10+ needs an explicit run() after initialize. */ -}}
+  {{- with resources.Get "mermaid.json" | minify -}}
+  <script src="{{ "mermaid.min.js" | relURL }}"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      mermaid.initialize({{ .Content | safeJS }});
+      mermaid.run();
+    });
+  </script>
+  {{- end -}}
+  {{- .Page.Store.Set "mermaid" true -}}
+{{- end -}}
