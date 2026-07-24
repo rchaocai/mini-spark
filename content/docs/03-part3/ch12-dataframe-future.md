@@ -147,13 +147,13 @@ count(*)
 
 有了这些信息，系统就可以做一些 RDD lambda 做不了的事：先过滤再投影、只读需要的列、把过滤条件尽量推到数据源附近、遇到分组再引入 shuffle。
 
-这些表达式有列名、有类型、没有副作用。系统看得懂，就能改写。
+这些表达式有列名，可以暴露引用关系，也被当作没有副作用的计算描述。系统看得懂，就能改写。
 
 这就是声明式接口的价值：
 
 ```text
 你说得更少：只说要什么
-系统知道得更多：知道列、类型、过滤、投影、聚合
+系统知道得更多：知道列名、引用关系、过滤、投影、聚合
 于是系统能替你优化
 ```
 
@@ -268,7 +268,7 @@ Aggregate(groupBy=[department], count(*))
   └── Scan(employees, columns=[id, name, department, salary])
 ```
 
-和 DataFrame API 的 `groupBy("department").count()` 是同一棵树，走完全一样的优化和物理计划链路。
+和 DataFrame API 的 `groupBy("department").count()` 是同一种计划形状，后面走同一套优化和物理计划链路。
 
 > [!INFO]
 > **Spark 版本和分支**
@@ -276,15 +276,15 @@ Aggregate(groupBy=[department], count(*))
 > SQL / DataFrame 支持从 **Spark 1.3**（`branch-1.3`）开始引入，最早的 SQL 解析器在
 > `sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/SqlParser.scala`，
 > 用 Scala 的 `StandardTokenParsers`（parser combinator）解析 SQL 字符串转成 LogicalPlan。
-> 本章的 `SqlParser` 参考了它的骨架，但用 Java 手写递归下降，只覆盖 `SELECT ... FROM ... GROUP BY ... + count(*)` 这个教学子集。
+> 本章的 `SqlParser` 参考了它的骨架，但用 Java 手写递归下降，只覆盖普通列投影、简单 `WHERE`、`GROUP BY ... + count(*)` 这个教学子集。
 
 `SqlParser` 的核心流程只有三步：
 
 ```text
-"SELECT department, count(*) FROM employees GROUP BY department"
+"SELECT department, count(*) FROM employees WHERE salary > 50000 GROUP BY department"
   → tokenize: 按空格、逗号、括号切 token
-  → 递归下降解析: SELECT子句 → FROM子句 → GROUP BY子句
-  → 构建 LogicalPlan: Aggregate([department], Scan(employees))
+  → 递归下降解析: SELECT子句 → FROM子句 → WHERE子句 → GROUP BY子句
+  → 构建 LogicalPlan: Aggregate([department], Filter(salary > 50000, Scan(employees)))
 ```
 
 `SQLContext` 新增了两个方法：
@@ -309,9 +309,9 @@ public DataFrame sql(String sqlText) {
 def sql(sqlText: String): DataFrame = DataFrame(this, parseSql(sqlText))
 ```
 
-`registerTable("employees", ...)` 把 `Scan` 放入表注册表，`sql("SELECT ... FROM employees ...")` 从注册表里找到 `Scan`，构建出和 DataFrame API 完全相同的逻辑计划树。
+`registerTable("employees", ...)` 把 `Scan` 放入表注册表，`sql("SELECT ... FROM employees ...")` 从注册表里找到 `Scan`，再按 SQL 子句构建 `Project`、`Filter` 或 `Aggregate`。这些节点和 DataFrame API 调用生成的是同一套逻辑计划节点。
 
-这就证明了一件事：**DataFrame API 和 SQL 是同一棵树的两张面具。** 无论你用哪种语法写查询，引擎做的事都一样。
+这就证明了一件事：**DataFrame API 和 SQL 会汇到同一种计划树。** 无论你用哪种语法写查询，后面的优化器和物理规划器都走同一条路。
 
 ## 12.3 DataFrame 到底是什么
 
@@ -390,12 +390,12 @@ Row.of("id", 1,
         "salary", 72_000)
 ```
 
-它内部是一个保留顺序的 `Map`。这不是高性能设计，只是为了让输出顺序稳定、容易读。
+本章代码里的 `Row` 用 `Object[]` 保存值，同时保留一张“字段名 → 位置”的索引表。这样既能展示 Spark 内部按位置访问的思路，又能让示例代码继续用 `row.get("salary")` 这种对初学者更直观的写法。
 
 Spark SQL 的内部行格式复杂得多，尤其现代版本会用更紧凑的二进制表示。但现在只要记住：
 
 ```text
-Row = 一行
+Row = 一行值，以及教学用的字段名索引
 Schema = 这一行有哪些列、列是什么类型
 ```
 

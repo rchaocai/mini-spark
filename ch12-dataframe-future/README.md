@@ -12,7 +12,7 @@ rdd.filter(row -> ((Number) row.get("salary")).doubleValue() > 50000)
    .map(row -> new Pair(row.get("name"), row.get("salary")))
    .reduceByKey(...);
 
-// DataFrame 方式：声明式、自动优化、类型安全
+// DataFrame 方式：声明式，把列、过滤和投影交给系统分析
 df.where(col("salary").gt(50000))
   .select(col("name"), col("salary"));
 ```
@@ -20,7 +20,7 @@ df.where(col("salary").gt(50000))
 DataFrame 带来的核心价值：
 - **声明式 API**：描述"要什么"，而不是"怎么做"
 - **自动优化**：Catalyst 优化器自动做谓词下推、列裁剪等
-- **类型安全**：编译时检查，避免运行时类型转换错误
+- **结构化信息**：Schema 和表达式树让系统看得懂列名、过滤条件和聚合键
 - **统一接口**：DataFrame API 和 SQL 字符串生成相同的执行计划
 
 ## 包结构
@@ -44,7 +44,7 @@ com.sparklearn.sql.execution.*          # 物理计划，把逻辑计划落回 R
 
 建议按以下顺序阅读代码，层层递进理解 DataFrame 的实现：
 
-1. **Row.java + Schema.java** - 理解数据模型：Row 是纯值序列，Schema 是外部描述
+1. **Row.java + Schema.java** - 理解数据模型：Row 保存值序列和字段名索引，Schema 描述列名与类型
 2. **Main.java** - 看 DataFrame API 怎么用，理解用户视角
 3. **DataFrame.java** - 理解惰性逻辑计划，每个操作返回新的 DataFrame
 4. **catalyst/expressions/** - 理解表达式树：Attribute、Literal、GreaterThan 等
