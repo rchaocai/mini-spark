@@ -21,6 +21,7 @@
 | 11 | Spark Streaming 与 DStream | `ch11-streaming` |
 | 12 | 从 RDD 到 DataFrame | `ch12-dataframe-future` |
 | 13 | 致敬工业级 Spark | `ch13-real-spark` |
+| 14 | Structured Streaming | `ch14-structured-streaming` |
 
 ## 构建
 
@@ -40,7 +41,7 @@ mvn -q -pl ch01-wordcount exec:java -Dexec.mainClass=com.sparklearn.WordCount   
 
 - **第一部分（Ch1-4）**：RDD 核心——分区、惰性迭代器、流水线、血缘
 - **第二部分（Ch5-8）**：调度与 Shuffle——多线程、落盘、DAG、容错
-- **第三部分（Ch9-13）**：云端与未来——网络、缓存、Streaming、DataFrame、真实 Spark 对照
+- **第三部分（Ch9-14）**：云端与未来——网络、缓存、Streaming、DataFrame、Structured Streaming、真实 Spark 对照
 
 ## 许可
 
