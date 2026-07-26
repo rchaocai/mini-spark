@@ -2,7 +2,7 @@
 
 用 **Java 17 从零手写一个 mini-spark**，在亲手实现中理解 Spark 内核：RDD、惰性求值、Shuffle、Stage/DAG、容错、Cache，直至 Streaming 与 DataFrame。不需要预先懂 Scala 或分布式——会基础 Java 就够了。
 
-> 在线阅读：[rchaocai.github.io/mini-spark](https://rchaocai.github.io/mini-spark/)
+
 
 ## 目录速览
 
