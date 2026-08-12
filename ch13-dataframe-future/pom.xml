@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.sparklearn</groupId>
+    <artifactId>spark-java-book</artifactId>
+    <version>0.1-SNAPSHOT</version>
+  </parent>
+  <artifactId>ch13-dataframe-future</artifactId>
+  <name>第 13 章 · 从 RDD 到 DataFrame</name>
+  <description>《手写 mini-Spark》第 13 章代码快照：在 RDD 内核上实现教学版 DataFrame 与 Catalyst。</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.codehaus.janino</groupId>
+      <artifactId>janino</artifactId>
+      <version>3.1.12</version>
+    </dependency>
+    <!--
+      ANTLR4 运行时：解析器在编译期由 antlr4-maven-plugin 生成 Java 代码，
+      运行时只需要 antlr4-runtime 提供的 Lexer/Parser 基类。
+      参考 Spark：sql/catalyst/pom.xml 同样引入 org.antlr:antlr4-runtime。
+    -->
+    <dependency>
+      <groupId>org.antlr</groupId>
+      <artifactId>antlr4-runtime</artifactId>
+      <version>4.13.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!--
+        ANTLR4 Maven 插件：在 generate-sources 阶段把 src/main/antlr4 下的 .g4
+        编译成 Java 词法/语法分析器，输出到 target/generated-sources/antlr4。
+        参考 Spark：sql/catalyst/pom.xml 用同样的插件 + libantlr4-maven-plugin。
+        本教学版只生成 Lexer/Parser/Visitor，不生成 Listener（listener=false）。
+      -->
+      <plugin>
+        <groupId>org.antlr</groupId>
+        <artifactId>antlr4-maven-plugin</artifactId>
+        <version>4.13.1</version>
+        <executions>
+          <execution>
+            <goals>
+              <goal>antlr4</goal>
+            </goals>
+            <configuration>
+              <listener>false</listener>
+              <visitor>true</visitor>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
